@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "package": "com.remag.scs.client.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [],
+  "client": [
+    "EntityMixin",
+    "PlayerRendererMixin",
+    "ItemInHandRendererMixin",
+    "GameRendererMixin",
+    "CameraMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
