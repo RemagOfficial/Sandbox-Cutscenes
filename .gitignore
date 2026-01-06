@@ -19,6 +19,11 @@ build
 
 # other
 eclipse
+run\logs
+run\saves
+run\crash-reports
+run\config
+run\downloads
 runs
 run-data
 
