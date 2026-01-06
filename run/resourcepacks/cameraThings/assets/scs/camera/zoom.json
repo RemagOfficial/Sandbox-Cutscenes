@@ -1,0 +1,23 @@
+{
+  "start": "relative",
+  "yaw": 180.0,
+  "pitch": 0.0,
+  "roll": 0.0,
+  "fov": 1.0,
+  "points": [
+    {
+      "comment": "Move back 5 blocks and zoom to max over the whole move",
+      "x": 0.0,
+      "y": 0.0,
+      "z": 10.0,
+      "yaw": 180.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "fov": 0.0,
+      "speed": 0.025,
+      "movement": "linear",
+      "easing": "LINEAR"
+    }
+  ],
+  "events": []
+}

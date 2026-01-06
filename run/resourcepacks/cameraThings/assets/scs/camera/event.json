@@ -1,0 +1,183 @@
+{
+  "start_event": ["move_player", "fade_black_intro", "fade_black_out"],
+  "end_event": ["return_player"],
+  "start": "relative",
+  "yaw": 49.7,
+  "pitch": -0.0,
+  "points": [
+    {
+      "x": 7.0699999999999985,
+      "y": 5.0,
+      "z": 7.069999999999993,
+      "yaw": 135.0,
+      "pitch": 26.6,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0
+    },
+    {
+      "x": 10.000000000000002,
+      "y": 6.0,
+      "z": 0.0,
+      "yaw": 90.0,
+      "pitch": 31.0,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0
+    },
+    {
+      "x": 7.0699999999999985,
+      "y": 5.0,
+      "z": -7.069999999999993,
+      "yaw": 45.0,
+      "pitch": 26.6,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0
+    },
+    {
+      "x": 0.0,
+      "y": 4.0,
+      "z": -10.0,
+      "yaw": -0.0,
+      "pitch": 21.8,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0,
+      "event": ["place_stone"]
+    },
+    {
+      "x": -7.07,
+      "y": 5.0,
+      "z": -7.069999999999993,
+      "yaw": -45.0,
+      "pitch": 26.6,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0
+    },
+    {
+      "x": -10.0,
+      "y": 6.0,
+      "z": 0.0,
+      "yaw": -90.0,
+      "pitch": 31.0,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0
+    },
+    {
+      "x": -7.07,
+      "y": 5.0,
+      "z": 7.069999999999993,
+      "yaw": -135.0,
+      "pitch": 26.6,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0
+    },
+    {
+      "x": 0.0,
+      "y": 4.0,
+      "z": 10.0,
+      "yaw": -180.0,
+      "pitch": 21.8,
+      "speed": 0.1,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "curved",
+      "lookX": 0.0,
+      "lookY": 0.0,
+      "lookZ": 0.0,
+      "event": ["fade_black_in", "overlay_logo"]
+    }
+  ],
+  "events": [
+    {
+      "name": "move_player",
+      "type": "command",
+      "data": {
+        "cmd": "tp @p ~ ~ ~20"
+      }
+    },
+    {
+      "name": "return_player",
+      "type": "command",
+      "data": {
+        "cmd": "tp @p ~ ~2 ~"
+      }
+    },
+    {
+      "name": "place_stone",
+      "type": "command",
+      "data": {
+        "cmd": "setblock ~ ~ ~ stone"
+      }
+    },
+    {
+      "name": "fade_black_out",
+      "type": "fade",
+      "data": {
+        "color": "#000000",
+        "duration": 1000,
+        "mode": "out"
+      }
+    },
+    {
+      "name": "fade_black_in",
+      "type": "fade",
+      "data": {
+        "color": "#000000",
+        "duration": 1000,
+        "mode": "in"
+      }
+    },
+    {
+      "name": "fade_black_intro",
+      "type": "intro_fade",
+      "data": {
+        "color": "#000000",
+        "duration": 1000
+      }
+    },
+    {
+      "name": "overlay_logo",
+      "type": "texture",
+      "data": {
+        "path": "scm:textures/gui/balls_title.png",
+        "centered": true,
+        "scale": 1.0,
+        "duration": 1500,
+        "fade": "in"
+      }
+    }
+  ]
+}

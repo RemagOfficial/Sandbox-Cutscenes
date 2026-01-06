@@ -1,0 +1,49 @@
+{
+  "start": "relative",
+  "yaw": -45.0,
+  "pitch": 35.3,
+  "points": [
+    {
+      "x": 0.0,
+      "y": 5.0,
+      "z": 10.0,
+      "yaw": -135.0,
+      "pitch": 54.8,
+      "speed": 0.2,
+      "pause": 0,
+      "easing": "EASE_IN_OUT",
+      "movement": "linear",
+      "lookX": 4.995279711486274,
+      "lookY": -5.002180282301737,
+      "lookZ": 5.002470418100273
+    },
+    {
+      "x": 9.999999999999998,
+      "y": 5.0,
+      "z": 10.0,
+      "yaw": 135.0,
+      "pitch": 54.7,
+      "speed": 0.2,
+      "pause": 0,
+      "easing": "LINEAR",
+      "movement": "linear",
+      "lookX": 4.995279711486274,
+      "lookY": -5.002180282301737,
+      "lookZ": 5.002470418100273
+    },
+    {
+      "x": 9.999999999999998,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 45.0,
+      "pitch": 35.3,
+      "speed": 0.2,
+      "pause": 0,
+      "easing": "EASE_OUT",
+      "movement": "linear",
+      "lookX": 4.999999999999998,
+      "lookY": -5.0,
+      "lookZ": 5.0
+    }
+  ]
+}
