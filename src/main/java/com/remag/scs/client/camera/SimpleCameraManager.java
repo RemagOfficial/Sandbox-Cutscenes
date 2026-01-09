@@ -1,31 +1,39 @@
 package com.remag.scs.client.camera;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.annotations.SerializedName;
 import com.remag.scs.client.render.CameraPathRenderer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
+import java.io.IOException;
+import java.io.BufferedWriter;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.*;
+
 import java.util.function.Function;
 import java.io.File;
 import java.io.FileWriter;
 import java.util.HashMap;
 import java.util.Map;
 import com.google.gson.JsonObject;
+import com.remag.scs.Config;
 import net.minecraft.client.gui.GuiGraphics;
 import com.mojang.blaze3d.systems.RenderSystem;
 
@@ -34,6 +42,22 @@ public class SimpleCameraManager {
     private static final Minecraft MC = Minecraft.getInstance();
     private static final Logger LOGGER = LoggerFactory.getLogger("Sandbox Cutscenes");
     private static final Gson GSON = new Gson();
+
+    private static final ExecutorService SAVE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "SCS-Save");
+        t.setDaemon(true);
+        return t;
+    });
+    private static volatile boolean saveInProgress = false;
+
+    private static boolean recording = false;
+    private static int nextRecordTick = -1;
+    
+    // Last recorded position and rotation for threshold checks
+    private static Vec3 lastRecordedPos = Vec3.ZERO;
+    private static float lastRecordedYaw = 0;
+    private static float lastRecordedPitch = 0;
+    private static boolean hasLastRecorded = false;
 
     private static SimpleCameraEntity camera;
     private static boolean active = false;
@@ -222,7 +246,7 @@ public class SimpleCameraManager {
 
     public static void rerunLastCutscene() {
         if (lastRunLocation != null) {
-            Vec3 origin = MC.player != null ? MC.player.getEyePosition().subtract(0, 1.5, 0) : lastRunOrigin;
+            Vec3 origin = MC.player != null ? MC.player.position() : lastRunOrigin;
             runCutscene(lastRunLocation, origin, CutsceneFinishedEvent.RunSource.HOTKEY);
         } else {
             sendError("No cutscene has been run yet to rerun.");
@@ -231,6 +255,30 @@ public class SimpleCameraManager {
 
     public static boolean hasActivePaths() {
         return !CameraPathRenderer.getAllPaths().isEmpty();
+    }
+
+    public static boolean isRecording() {
+        return recording;
+    }
+
+    public static void setRecording(boolean enabled) {
+        if (recording == enabled) return;
+        
+        recording = enabled;
+        
+        if (enabled) {
+            // Reset last recorded position and rotation when starting a new recording
+            hasLastRecorded = false;
+            nextRecordTick = 0; // Record immediately on next tick
+            
+            if (MC.player != null) {
+                MC.player.displayClientMessage(Component.literal("§aStarted recording camera path"), true);
+            }
+        } else {
+            if (MC.player != null) {
+                MC.player.displayClientMessage(Component.literal("§aStopped recording camera path"), true);
+            }
+        }
     }
 
     public record EventInfo(String type, String data) {}
@@ -386,11 +434,30 @@ public class SimpleCameraManager {
         List<CameraPathRenderer.NodeData> currentNodes = allPaths.get(activeId);
         if (currentNodes == null || currentNodes.isEmpty()) return;
 
-        Vec3 playerPos = MC.player.getEyePosition();
+        Vec3 playerPos = MC.player.position();
         float yaw = MC.player.getYRot();
         float pitch = MC.player.getXRot();
         float roll = 0;
         float fov = 1.0f;
+
+        // Check if we've moved/rotated enough to record a new point
+        if (hasLastRecorded) {
+            double posThreshold = Config.POSITION_THRESHOLD.get();
+            double rotThreshold = Config.ROTATION_THRESHOLD.get();
+            
+            double distanceMoved = playerPos.distanceToSqr(lastRecordedPos);
+            double yawDiff = Math.abs(Mth.wrapDegrees(yaw - lastRecordedYaw));
+            double pitchDiff = Math.abs(Mth.wrapDegrees(pitch - lastRecordedPitch));
+            
+            // Only add a new node if we've moved beyond the threshold
+            if (distanceMoved < (posThreshold * posThreshold) && 
+                yawDiff < rotThreshold && 
+                pitchDiff < rotThreshold) {
+                return; // Not enough movement/rotation to record a new point
+            }
+        }
+
+        double defaultSpeed = 1.0; // Default speed set to 1.0
 
         // Use the established base offset from the first node
         Vec3 startPos = currentNodes.getFirst().pos;
@@ -402,18 +469,29 @@ public class SimpleCameraManager {
                 pitch,
                 roll,
                 fov,
-                1.0, // Default speed
+                defaultSpeed, // Default speed
                 currentNodes.size(), // Next index
                 0,   // No pause
                 EasingType.LINEAR,
-                "linear"
+                "curved"
         );
 
         currentNodes.add(newNode);
         CameraPathRenderer.setDirty(true);
+        
+        // Update last recorded position and rotation
+        lastRecordedPos = playerPos;
+        lastRecordedYaw = yaw;
+        lastRecordedPitch = pitch;
+        hasLastRecorded = true;
+        lastRecordedYaw = yaw;
+        lastRecordedPitch = pitch;
+        hasLastRecorded = true;
 
-        // Notify the user
-        MC.player.displayClientMessage(Component.literal("§aAdded Node " + newNode.index + " to active path: " + activeId.getPath()), true);
+        // Notify the user (but only if not the first point to avoid spam)
+        if (currentNodes.size() > 1) {
+            MC.player.displayClientMessage(Component.literal("§aAdded Node " + newNode.index + " to active path: " + activeId.getPath()), true);
+        }
     }
 
     public static void sendError(String message) {
@@ -584,6 +662,17 @@ public class SimpleCameraManager {
         if (!active || camera == null) return;
         camera.setCameraRotation(yaw, pitch);
     }
+    
+    private static void syncCameraState() {
+        if (camera == null) return;
+        // Sync previous frame's state to prevent interpolation artifacts
+        camera.xo = camera.getX();
+        camera.yo = camera.getY();
+        camera.zo = camera.getZ();
+        camera.xRotO = camera.getXRot();
+        camera.yRotO = camera.getYRot();
+        camera.yHeadRotO = camera.yHeadRot;
+    }
 
     private static void apply(Vec3 pos, float yaw, float pitch) {
         setPosition(pos);
@@ -627,6 +716,20 @@ public class SimpleCameraManager {
     /* ---------------- Queue / Movement ---------------- */
 
     public static void tick() {
+        if (Config.DEVELOPER_MODE.get() && recording) {
+            int now = MC.gui != null ? MC.gui.getGuiTicks() : 0;
+            if (nextRecordTick == -1) {
+                nextRecordTick = now;
+            }
+            if (now >= nextRecordTick) {
+                if (hasActivePaths() && !isActive()) {
+                    addNodeAtPlayer();
+                }
+                int interval = Config.RECORDING_INTERVAL_TICKS.get();
+                nextRecordTick = now + Math.max(1, interval);
+            }
+        }
+
         // Handle deferred chat restoration
         if (chatRestoreTick != -1) {
             if (MC.gui != null && MC.gui.getGuiTicks() >= chatRestoreTick) {
@@ -712,39 +815,62 @@ public class SimpleCameraManager {
         }
     }
 
+    // Helper method to ensure smooth angle interpolation
+    private static float lerpAngle(float start, float end, float t) {
+        // Normalize angles to 0-360 range
+        float diff = ((end - start) % 360.0f + 540.0f) % 360.0f - 180.0f;
+        return start + diff * t;
+    }
+
     public static void renderTick(float partialTick) {
-        if (!active || camera == null || !isMoving) return;
+        if (!active || camera == null) return;
 
         synchronized (MOVE_LOCK) {
-            double currentTickProgress = (MC.gui.getGuiTicks() + partialTick) - moveStartTick;
-            double t = Mth.clamp(currentTickProgress / moveDurationTicks, 0.0, 1.0);
-            double easedT = moveEasing.ease(t);
+            if (!isMoving) {
+                // Even when not moving, ensure camera is at exact position
+                if (moveTargetPos != null) {
+                    camera.setPos(moveTargetPos.x, moveTargetPos.y, moveTargetPos.z);
+                    camera.setXRot(moveTargetPitch);
+                    camera.setYRot(moveTargetYaw);
+                    camera.yHeadRot = moveTargetYaw;
+                    syncCameraState();
+                }
+                return;
+            }
 
+            // Calculate precise time with partial tick
+            double currentTickProgress = (MC.gui.getGuiTicks() - moveStartTick) + partialTick;
+            double t = Mth.clamp(currentTickProgress / moveDurationTicks, 0.0, 1.0);
+            
+            // Apply easing with optional overshoot for smoother transitions
+            double easedT = moveEasing.ease(t);
+            
+            // Interpolate position
             Vec3 newPos;
             if ("curved".equals(moveType) && moveP0 != null && moveP3 != null) {
-                newPos = CameraPathRenderer.calculateCatmullRom(moveP0, moveStartPos, moveTargetPos, moveP3, (float) easedT);
+                newPos = CameraPathRenderer.calculateCatmullRom(
+                    moveP0, moveStartPos, moveTargetPos, moveP3, (float) easedT);
             } else {
+                // Use linear interpolation with optional smoothing
                 newPos = moveStartPos.lerp(moveTargetPos, easedT);
             }
 
-            float newYaw = Mth.rotLerp((float) easedT, moveStartYaw, moveTargetYaw);
-            float newPitch = Mth.lerp((float) easedT, moveStartPitch, moveTargetPitch);
-            float newRoll = Mth.lerp((float) easedT, moveStartRoll, moveTargetRoll);
-            float newFov = Mth.lerp((float) easedT, moveStartFov, moveTargetFov);
+            // Interpolate angles with proper wrapping
+            float newYaw = lerpAngle(moveStartYaw, moveTargetYaw, (float)easedT);
+            float newPitch = Mth.lerp((float)easedT, moveStartPitch, moveTargetPitch);
+            float newRoll = Mth.lerp((float)easedT, moveStartRoll, moveTargetRoll);
+            float newFov = Mth.lerp((float)easedT, moveStartFov, moveTargetFov);
 
+            // Apply the new state
             camera.setPos(newPos.x, newPos.y, newPos.z);
             camera.setXRot(newPitch);
             camera.setYRot(newYaw);
             camera.yHeadRot = newYaw;
 
-            // Sync old values to prevent vanilla interpolation jitter
-            camera.xo = camera.getX();
-            camera.yo = camera.getY();
-            camera.zo = camera.getZ();
-            camera.xRotO = camera.getXRot();
-            camera.yRotO = camera.getYRot();
-            camera.yHeadRotO = camera.yHeadRot;
+            // Sync previous frame's state to prevent interpolation artifacts
+            syncCameraState();
 
+            // Update current state
             currentYaw = newYaw;
             currentPitch = newPitch;
             currentRoll = newRoll;
@@ -762,43 +888,87 @@ public class SimpleCameraManager {
     private static void startMove(QueuedMove move) {
         if (camera == null) return;
 
-        activeMoveEvents = move.eventNames; // Store events to fire upon arrival
+        // Store events to fire upon arrival
+        activeMoveEvents = move.eventNames;
+        
+        // Get current position precisely
         moveStartPos = camera.position();
         moveStartYaw = currentYaw;
         moveStartPitch = currentPitch;
         moveStartRoll = currentRoll;
         moveStartFov = currentFov;
 
+        // Set target position and orientation
         moveTargetPos = move.pos;
         moveTargetYaw = move.yaw;
         moveTargetPitch = move.pitch;
         moveTargetRoll = move.roll;
         moveTargetFov = move.fov;
 
+        // Calculate movement parameters
         double distance = moveStartPos.distanceTo(moveTargetPos);
         if (distance <= 0.0001) {
+            // If no movement needed, just update orientation and schedule next move
             apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
             pauseEndTick = move.postDelay > 0 ? MC.gui.getGuiTicks() + (int)(move.postDelay / 50) : 0;
+            isMoving = false;
             return;
         }
 
-        moveDurationTicks = Math.max(1, (int) (distance / move.speed));
+        // Calculate duration based on speed and recording interval from config
+        // speed 1.0 = 1x recording interval, 0.5 = half the interval, 2.0 = double, etc.
+        // This ensures smooth movement that matches the recording timing
+        int baseTicks = Config.RECORDING_INTERVAL_TICKS.get();
+        moveDurationTicks = Math.max(1, (int)(baseTicks / move.speed));
         moveStartTick = MC.gui.getGuiTicks();
-        moveEasing = move.easing;
-        moveType = move.movement;
+        moveEasing = move.easing != null ? move.easing : EasingType.EASE_IN_OUT; // Default to ease in/out for smooth transitions
+        moveType = move.movement != null ? move.movement : "linear";
         moveP0 = move.p0;
         moveP3 = move.p3;
 
+        // Schedule any post-move delay
         pauseEndTick = move.postDelay > 0 ? moveStartTick + moveDurationTicks + (int)(move.postDelay / 50) : 0;
+        
+        // Mark as moving
         isMoving = true;
+        
+        // Immediately update to the first frame of movement to prevent any delay
+        if (moveDurationTicks > 0) {
+            double t = 1.0 / moveDurationTicks; // Very small step for first frame
+            double easedT = moveEasing.ease(t);
+            
+            // Calculate first frame position
+            Vec3 newPos;
+            if ("curved".equals(moveType) && moveP0 != null && moveP3 != null) {
+                newPos = CameraPathRenderer.calculateCatmullRom(
+                    moveP0, moveStartPos, moveTargetPos, moveP3, (float)easedT);
+            } else {
+                newPos = moveStartPos.lerp(moveTargetPos, easedT);
+            }
+            
+            // Calculate first frame rotation
+            float newYaw = lerpAngle(moveStartYaw, moveTargetYaw, (float)easedT);
+            float newPitch = Mth.lerp((float)easedT, moveStartPitch, moveTargetPitch);
+            float newRoll = Mth.lerp((float)easedT, moveStartRoll, moveTargetRoll);
+            float newFov = Mth.lerp((float)easedT, moveStartFov, moveTargetFov);
+            
+            // Apply the first frame immediately
+            apply(newPos, newYaw, newPitch, newRoll, newFov);
+        } else {
+            // If duration is 0, jump to target
+            apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
+        }
     }
 
     private static void finishMove() {
         isMoving = false;
-        // Check if we can proceed immediately
-        if (pauseEndTick == 0 || System.currentTimeMillis() >= pauseEndTick) {
+        // Ensure we're exactly at the target position
+        if (moveTargetPos != null) {
+            apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
+        }
+        // Reset pause timer if it's in the past
+        if (pauseEndTick > 0 && MC.gui.getGuiTicks() >= pauseEndTick) {
             pauseEndTick = 0;
-            processNextMove();
         }
     }
 
@@ -1006,19 +1176,27 @@ public class SimpleCameraManager {
 
     public enum EasingType {
         LINEAR(t -> t),
-        EASE_IN(t -> t * t),
-        EASE_OUT(t -> 1 - Math.pow(1 - t, 2)),
-        EASE_IN_OUT(t -> 0.5 - Math.cos(t * Math.PI) / 2);
+        EASE_IN(t -> t * t * t),
+        EASE_OUT(t -> 1 - Math.pow(1 - t, 3)),
+        EASE_IN_OUT(t -> t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
         private final Function<Double, Double> func;
         EasingType(Function<Double, Double> func) { this.func = func; }
-        public double ease(double t) { return func.apply(Math.min(1.0, Math.max(0.0, t))); }
+        public double ease(double t) { 
+            t = Math.min(1.0, Math.max(0.0, t));
+            return func.apply(t); 
+        }
     }
 
     public static void saveCurrentPath() {
         var allPaths = CameraPathRenderer.getAllPaths();
         if (allPaths.size() > 1) {
             sendError("Multiple paths are currently previewed. Clear others or only preview one to save.");
+            return;
+        }
+
+        if (saveInProgress) {
+            sendError("A save is already in progress.");
             return;
         }
 
@@ -1097,18 +1275,107 @@ public class SimpleCameraManager {
                 String fileName = currentPreviewLocation.getPath().substring(currentPreviewLocation.getPath().lastIndexOf('/') + 1);
                 saveFile = new File(dir, fileName.endsWith(".json") ? fileName : fileName + ".json");
             }
-
-            try (FileWriter writer = new FileWriter(saveFile)) {
-                GSON.newBuilder().setPrettyPrinting().create().toJson(data, writer);
-                CameraPathRenderer.setDirty(false); // Reset dirty flag on save
-                MC.player.displayClientMessage(Component.literal("§aSaved to: " + saveFile.getName()), false);
+            final File saveFileFinal = saveFile;
+            final String saveFileName = saveFileFinal.getName();
+            saveInProgress = true;
+            if (MC.player != null) {
+                MC.player.displayClientMessage(Component.literal("§eSaving: " + saveFileName + " ..."), true);
             }
+
+            String json = GSON.newBuilder().setPrettyPrinting().create().toJson(data);
+            int totalChars = json.length();
+
+            CompletableFuture.runAsync(() -> {
+                try (BufferedWriter writer = new BufferedWriter(new FileWriter(saveFileFinal))) {
+                    final int chunkSize = 64 * 1024;
+                    int written = 0;
+                    long lastUpdateNs = 0;
+
+                    while (written < totalChars) {
+                        int end = Math.min(totalChars, written + chunkSize);
+                        writer.write(json, written, end - written);
+                        written = end;
+
+                        long now = System.nanoTime();
+                        if (lastUpdateNs == 0 || (now - lastUpdateNs) > 250_000_000L) { // ~250ms
+                            int pct = totalChars == 0 ? 100 : (int) Math.min(100L, (written * 100L) / totalChars);
+                            lastUpdateNs = now;
+                            int finalPct = pct;
+                            MC.execute(() -> {
+                                if (MC.player != null) {
+                                    MC.player.displayClientMessage(Component.literal("§eSaving: " + saveFileName + " ... " + finalPct + "%"), true);
+                                }
+                            });
+                        }
+                    }
+                    writer.flush();
+
+                    MC.execute(() -> {
+                        CameraPathRenderer.setDirty(false); // Reset dirty flag on save
+                        if (MC.player != null) {
+                            MC.player.displayClientMessage(Component.literal("§aSaved to: " + saveFileName), false);
+                        }
+                    });
+                } catch (Exception e) {
+                    LOGGER.error("Save failed", e);
+                    MC.execute(() -> sendError("Save failed: " + e.getMessage()));
+                } finally {
+                    saveInProgress = false;
+                }
+            }, SAVE_EXECUTOR);
         } catch (Exception e) {
             LOGGER.error("Save failed", e);
             sendError("Save failed: " + e.getMessage());
         }
     }
 
-    // Updated save directory check
-    File dir = new File(MC.gameDirectory, "saved_cutscenes");
+    public static void createNewRelativeCutsceneFile(String requestedName) {
+        if (MC.player == null) return;
+
+        String baseName = requestedName == null ? "cutscene" : requestedName.trim();
+        if (baseName.isEmpty()) baseName = "cutscene";
+
+        // Prevent directory traversal / nested folders
+        baseName = baseName.replace('\\', '_').replace('/', '_');
+        baseName = baseName.replaceAll("[^a-zA-Z0-9._-]", "_");
+
+        String fileName = baseName.endsWith(".json") ? baseName : (baseName + ".json");
+
+        File dir = new File(MC.gameDirectory, "saved_camera_paths");
+        if (!dir.exists() && !dir.mkdirs()) {
+            sendError("Failed to create folder: saved_camera_paths");
+            return;
+        }
+
+        File out = new File(dir, fileName);
+        if (out.exists()) {
+            String stem = fileName.substring(0, fileName.length() - ".json".length());
+            int i = 1;
+            while (out.exists()) {
+                out = new File(dir, stem + "_" + i + ".json");
+                i++;
+            }
+        }
+
+        try {
+            JsonObject root = new JsonObject();
+            root.addProperty("start", "relative");
+            root.addProperty("yaw", 0.0f);
+            root.addProperty("pitch", 0.0f);
+            root.addProperty("roll", 0.0f);
+            root.addProperty("fov", 1.0f);
+            root.add("points", new JsonArray());
+
+            try (FileWriter writer = new FileWriter(out)) {
+                GSON.newBuilder().setPrettyPrinting().create().toJson(root, writer);
+            }
+            MC.player.displayClientMessage(Component.literal("§aCreated cutscene: " + out.getName()), false);
+        } catch (IOException e) {
+            LOGGER.error("Failed to create new cutscene file", e);
+            sendError("Failed to create cutscene: " + e.getMessage());
+        } catch (Exception e) {
+            LOGGER.error("Failed to create new cutscene file", e);
+            sendError("Failed to create cutscene: " + e.getMessage());
+        }
+    }
 }

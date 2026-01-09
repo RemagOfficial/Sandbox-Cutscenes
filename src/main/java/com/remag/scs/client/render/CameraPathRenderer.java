@@ -303,20 +303,22 @@ public class CameraPathRenderer {
         }
 
         for (List<NodeData> pathNodes : PATHS.values()) {
-            BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
-            // Draw Lines/Curves
-            for (int i = 0; i < pathNodes.size() - 1; i++) {
-                NodeData startNode = pathNodes.get(i);
-                NodeData endNode = pathNodes.get(i + 1);
+            // Draw Lines/Curves (only if we have at least 2 nodes)
+            if (pathNodes.size() >= 2) {
+                BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+                for (int i = 0; i < pathNodes.size() - 1; i++) {
+                    NodeData startNode = pathNodes.get(i);
+                    NodeData endNode = pathNodes.get(i + 1);
 
-                if ("curved".equals(endNode.movement) && pathNodes.size() > 2) {
-                    renderCurve(matrix, buffer, pathNodes, i);
-                } else {
-                    buffer.addVertex(matrix, (float)startNode.pos.x, (float)startNode.pos.y, (float)startNode.pos.z).setColor(255, 255, 0, 255);
-                    buffer.addVertex(matrix, (float)endNode.pos.x, (float)endNode.pos.y, (float)endNode.pos.z).setColor(255, 255, 0, 255);
+                    if ("curved".equals(endNode.movement) && pathNodes.size() > 2) {
+                        renderCurve(matrix, buffer, pathNodes, i);
+                    } else {
+                        buffer.addVertex(matrix, (float)startNode.pos.x, (float)startNode.pos.y, (float)startNode.pos.z).setColor(255, 255, 0, 255);
+                        buffer.addVertex(matrix, (float)endNode.pos.x, (float)endNode.pos.y, (float)endNode.pos.z).setColor(255, 255, 0, 255);
+                    }
                 }
+                BufferUploader.drawWithShader(buffer.buildOrThrow());
             }
-            BufferUploader.drawWithShader(buffer.buildOrThrow());
 
             // Draw Nodes
             for (int i = 0; i < pathNodes.size(); i++) {

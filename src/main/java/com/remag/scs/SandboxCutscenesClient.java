@@ -8,9 +8,11 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.item.ItemStack;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -89,7 +91,7 @@ public class SandboxCutscenesClient {
                 if (SimpleCameraManager.hasActivePaths()) {
                     SimpleCameraManager.addNodeAtPlayer();
                 } else {
-                    mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c[Camera Mod] No path previewed to add nodes to."), true);
+                    mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c[Sandbox Cutscenes] No path previewed to add nodes to."), true);
                 }
             }
 
@@ -101,15 +103,15 @@ public class SandboxCutscenesClient {
                 if (SimpleCameraManager.hasActivePaths()) {
                     long currentTime = System.currentTimeMillis();
                     if (CameraPathRenderer.isDirty() && (currentTime - lastClearAttempt > 5000)) {
-                        mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§6[Camera Mod] You have unsaved changes! Press again to confirm clear."), true);
+                        mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§6[Sandbox Cutscenes] You have unsaved changes! Press again to confirm clear."), true);
                         lastClearAttempt = currentTime;
                     } else {
                         CameraPathRenderer.clear();
-                        mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§a[Camera Mod] Cleared all previews."), true);
+                        mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§a[Sandbox Cutscenes] Cleared all previews."), true);
                         lastClearAttempt = 0;
                     }
                 } else {
-                    mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c[Camera Mod] No paths are currently previewed."), true);
+                    mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c[Sandbox Cutscenes] No paths are currently previewed."), true);
                 }
             }
         }
@@ -134,7 +136,7 @@ public class SandboxCutscenesClient {
                         .then(Commands.argument("path", ResourceLocationArgument.id())
                                 .executes(context -> {
                                     ResourceLocation path = ResourceLocationArgument.getId(context, "path");
-                                    Vec3 origin = Minecraft.getInstance().player != null ? Minecraft.getInstance().player.getEyePosition().subtract(0, 1.5, 0) : Vec3.ZERO;
+                                    Vec3 origin = Minecraft.getInstance().player != null ? Minecraft.getInstance().player.position() : Vec3.ZERO;
                                     SimpleCameraManager.runCutscene(path, origin, CutsceneFinishedEvent.RunSource.COMMAND);
                                     return 1;
                                 })
@@ -152,7 +154,7 @@ public class SandboxCutscenesClient {
                         .then(Commands.argument("path", ResourceLocationArgument.id())
                                 .executes(context -> {
                                     ResourceLocation path = ResourceLocationArgument.getId(context, "path");
-                                    Vec3 origin = Minecraft.getInstance().player != null ? Minecraft.getInstance().player.getEyePosition().subtract(0, 1.5, 0) : Vec3.ZERO;
+                                    Vec3 origin = Minecraft.getInstance().player != null ? Minecraft.getInstance().player.position() : Vec3.ZERO;
                                     SimpleCameraManager.previewCutscene(path, origin);
                                     return 1;
                                 })
@@ -176,6 +178,19 @@ public class SandboxCutscenesClient {
                 .then(Commands.literal("save")
                         .executes(context -> {
                             SimpleCameraManager.saveCurrentPath();
+                            return 1;
+                        })
+                )
+                .then(Commands.literal("new")
+                        .then(Commands.argument("name", StringArgumentType.greedyString())
+                                .executes(context -> {
+                                    String name = StringArgumentType.getString(context, "name");
+                                    SimpleCameraManager.createNewRelativeCutsceneFile(name);
+                                    return 1;
+                                })
+                        )
+                        .executes(context -> {
+                            SimpleCameraManager.createNewRelativeCutsceneFile("cutscene");
                             return 1;
                         })
                 )
@@ -225,15 +240,31 @@ public class SandboxCutscenesClient {
         }
         
         if (event.getButton() == GLFW.GLFW_MOUSE_BUTTON_RIGHT && event.getAction() == GLFW.GLFW_PRESS) {
+            // Recording tool takes priority so you can always toggle recording,
+            // even if a node/event is currently hovered.
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player != null) {
+                ItemStack held = mc.player.getMainHandItem();
+                String heldId = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
+                String toolId = Config.RECORDING_TOOL_ITEM.get();
+                if (toolId != null && toolId.equals(heldId)) {
+                    SimpleCameraManager.setRecording(!SimpleCameraManager.isRecording());
+                    event.setCanceled(true); // Prevent stick/item use
+                    return;
+                }
+            }
+
+            // Preserve existing editor right-click behaviors
             if (CameraPathRenderer.getHoveredEvent() != null) {
                 CameraPathRenderer.handleRightClick();
                 event.setCanceled(true); // Prevent item use
-            } else {
-                CameraPathRenderer.NodeData hoveredNode = CameraPathRenderer.getHoveredNode();
-                if (hoveredNode != null) {
-                    Minecraft.getInstance().setScreen(new NodeEditorScreen(hoveredNode));
-                    event.setCanceled(true); // Prevent item use
-                }
+                return;
+            }
+            CameraPathRenderer.NodeData hoveredNode = CameraPathRenderer.getHoveredNode();
+            if (hoveredNode != null) {
+                Minecraft.getInstance().setScreen(new NodeEditorScreen(hoveredNode));
+                event.setCanceled(true); // Prevent item use
+                return;
             }
         }
     }
