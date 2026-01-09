@@ -14,6 +14,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.neoforged.neoforge.common.NeoForge;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -983,6 +984,10 @@ public class SimpleCameraManager {
                 }
             }
 
+            // Store the cutscene ID before we clear it
+            ResourceLocation finishedCutsceneId = lastRunLocation;
+            CutsceneFinishedEvent.RunSource source = currentRunSource;
+
             // Defer restoration to catch server feedback
             chatRestoreTick = MC.gui.getGuiTicks() + 10;
 
@@ -998,6 +1003,12 @@ public class SimpleCameraManager {
                 isMoving = false;
                 pendingDisable = false;
                 moveTargetPos = null;
+            }
+            
+            // Fire the cutscene finished event
+            if (finishedCutsceneId != null) {
+                CutsceneFinishedEvent event = new CutsceneFinishedEvent(finishedCutsceneId, source);
+                NeoForge.EVENT_BUS.post(event);
             }
         });
     }
