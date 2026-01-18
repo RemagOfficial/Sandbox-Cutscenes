@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.annotations.SerializedName;
+import com.remag.scs.SandboxCutscenes;
 import com.remag.scs.client.render.CameraPathRenderer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
@@ -37,12 +38,13 @@ import com.google.gson.JsonObject;
 import com.remag.scs.Config;
 import net.minecraft.client.gui.GuiGraphics;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.google.gson.GsonBuilder;
 
 public class SimpleCameraManager {
 
     private static final Minecraft MC = Minecraft.getInstance();
     private static final Logger LOGGER = LoggerFactory.getLogger("Sandbox Cutscenes");
-    private static final Gson GSON = new Gson();
+    private static final Gson GSON = new Gson(); // Reverted to default (ignores nulls)
 
     private static final ExecutorService SAVE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "SCS-Save");
@@ -128,9 +130,45 @@ public class SimpleCameraManager {
 
     // Texture event state
     private static final List<ActiveTexture> ACTIVE_TEXTURES = new ArrayList<>();
+    
+    // Thresholds for adding new points
+    private static final double posThreshold = 0.1; // Minimum distance to move before adding a new point
+    private static final double rotThreshold = 5.0; // Minimum rotation in degrees before adding a new point
+    
+    // Error handling
+    public static void sendError(String message) {
+        if (MC.player != null) {
+            MC.player.displayClientMessage(Component.literal("§c[Sandbox Cutscenes] " + message), false);
+        } else {
+            LOGGER.error("[Sandbox Cutscenes] {}", message);
+        }
+    }
     private record ActiveTexture(ResourceLocation texture, int x, int y, float scale, int startTick, int durationTicks, String fadeMode, boolean centered) {}
 
-    private record QueuedMove(Vec3 pos, float yaw, float pitch, float roll, float fov, double speed, long postDelay, EasingType easing, String movement, @Nullable Vec3 p0, @Nullable Vec3 p3, @Nullable List<String> eventNames) {}
+    private record QueuedMove(Vec3 pos, float yaw, float pitch, float roll, float fov, 
+                            double speed, // For manual movement speed (blocks per second)
+                            Long duration, // For recorded points (in milliseconds)
+                            long postDelay, 
+                            EasingType easing, 
+                            String movement, 
+                            @Nullable Vec3 p0, 
+                            @Nullable Vec3 p3, 
+                            @Nullable List<String> eventNames) {
+        
+        // Constructor for manual movement with speed
+        public static QueuedMove withSpeed(Vec3 pos, float yaw, float pitch, float roll, float fov,
+                                         double speed, long postDelay, EasingType easing,
+                                         String movement, Vec3 p0, Vec3 p3, List<String> eventNames) {
+            return new QueuedMove(pos, yaw, pitch, roll, fov, speed, null, postDelay, easing, movement, p0, p3, eventNames);
+        }
+        
+        // Constructor for recorded movement with duration
+        public static QueuedMove withDuration(Vec3 pos, float yaw, float pitch, float roll, float fov,
+                                            long durationMs, long postDelay, EasingType easing,
+                                            String movement, Vec3 p0, Vec3 p3, List<String> eventNames) {
+            return new QueuedMove(pos, yaw, pitch, roll, fov, 0, durationMs, postDelay, easing, movement, p0, p3, eventNames);
+        }
+    }
 
     private static List<String> parseEventList(JsonElement element) {
         List<String> list = new ArrayList<>();
@@ -155,7 +193,7 @@ public class SimpleCameraManager {
 
         @SerializedName("start_event")
         public JsonElement startEvent; // Can be String or JsonArray
-    
+
         @SerializedName("end_event")
         public JsonElement endEvent; // Can be String or JsonArray
 
@@ -175,12 +213,33 @@ public class SimpleCameraManager {
             public double x, y, z;
             public float yaw, pitch, roll;
             public float fov = 1.0f; // Default to 1.0
-            public double speed = 1.0;
+            private Double speed = null; // Changed initialization to null
+            private Long duration = null; // Used only for recorded points (duration in milliseconds)
             public long pause = 0;
             public EasingType easing = EasingType.LINEAR;
             public String movement = "linear";
             public Double lookX, lookY, lookZ;
             public JsonElement event; // Can be String or JsonArray
+
+            // Getter for speed (returns null for recorded points)
+            public Double getSpeed() {
+                return speed;
+            }
+
+            // Setter for speed (only for manual points)
+            public void setSpeed(Double speed) {
+                this.speed = speed;
+            }
+
+            // Getter for duration (returns null for manual points)
+            public Long getDuration() {
+                return duration;
+            }
+
+            // Setter for duration (only for recorded points)
+            public void setDuration(Long duration) {
+                this.duration = duration;
+            }
         }
 
         public static class Event {
@@ -351,7 +410,7 @@ public class SimpleCameraManager {
                 }
                 previewBaseOffset = baseOffset; // Tracking for refresh
 
-                nodes.add(new CameraPathRenderer.NodeData(baseOffset, startYaw, startPitch, startRoll, 1, 0, 0, 0, EasingType.LINEAR, "linear"));
+                nodes.add(new CameraPathRenderer.NodeData(baseOffset, startYaw, startPitch, startRoll, 1, 0D, 0, 0, EasingType.LINEAR, "linear"));
 
                 for (int i = 0; i < data.points.size(); i++) {
                     CutsceneData.Point p = data.points.get(i);
@@ -422,61 +481,97 @@ public class SimpleCameraManager {
         }
     }
 
-    public static void addNodeAtPlayer() {
+    private static void addRecordedPoint(Vec3 pos, float yaw, float pitch, float roll, float fov) {
         var allPaths = CameraPathRenderer.getAllPaths();
-        if (allPaths.size() > 1) {
-            sendError("Multiple paths are currently previewed. Clear others or only preview one to add nodes.");
-            return;
-        }
-
+        if (allPaths.size() > 1) return;
+        
         ResourceLocation activeId = CameraPathRenderer.getActivePathId();
         if (activeId == null || MC.player == null) return;
 
         List<CameraPathRenderer.NodeData> currentNodes = allPaths.get(activeId);
-        if (currentNodes == null || currentNodes.isEmpty()) return;
+        if (currentNodes == null) return;
+        
+        // For recorded points, always use duration based on recording interval
+        long durationMs = Config.RECORDING_INTERVAL_TICKS.get() * 50L; // 1 tick = 50ms
+        
+        CameraPathRenderer.NodeData newNode = new CameraPathRenderer.NodeData(
+            pos,
+            yaw,
+            pitch,
+            roll,
+            fov,
+            currentNodes.size(),
+            EasingType.LINEAR,
+            "curved"
+        );
 
+        // Explicitly set duration and clear speed for recorded points
+        newNode.setDuration(durationMs);
+        newNode.setSpeed(null); // Clear speed to ensure duration is used
+        
+        currentNodes.add(newNode);
+        CameraPathRenderer.setDirty(true);
+        
+        // Update last recorded position and rotation
+        lastRecordedPos = pos;
+        lastRecordedYaw = yaw;
+        lastRecordedPitch = pitch;
+        hasLastRecorded = true;
+        
+        // Notify the user (but only if not the first point to avoid spam)
+        if (currentNodes.size() > 1) {
+            MC.player.displayClientMessage(Component.literal("§aAdded Node " + newNode.index + " to active path: " + activeId.getPath()), true);
+        }
+    }
+    
+    public static void addNodeAtPlayer() {
+        if (MC.player == null || !hasActivePaths()) return;
+        
+        // Get player position and rotation
         Vec3 playerPos = MC.player.position();
         float yaw = MC.player.getYRot();
         float pitch = MC.player.getXRot();
         float roll = 0;
-        float fov = 1.0f;
-
-        // Check if we've moved/rotated enough to record a new point
+        float fov = (float) MC.options.fov().get();
+        
+        List<CameraPathRenderer.NodeData> currentNodes = CameraPathRenderer.getPathNodes();
+        if (currentNodes == null || currentNodes.isEmpty()) return;
+        
+        // Check if we've moved enough to add a new point
         if (hasLastRecorded) {
-            double posThreshold = Config.POSITION_THRESHOLD.get();
-            double rotThreshold = Config.ROTATION_THRESHOLD.get();
-            
             double distanceMoved = playerPos.distanceToSqr(lastRecordedPos);
             double yawDiff = Math.abs(Mth.wrapDegrees(yaw - lastRecordedYaw));
             double pitchDiff = Math.abs(Mth.wrapDegrees(pitch - lastRecordedPitch));
             
-            // Only add a new node if we've moved beyond the threshold
             if (distanceMoved < (posThreshold * posThreshold) && 
                 yawDiff < rotThreshold && 
                 pitchDiff < rotThreshold) {
-                return; // Not enough movement/rotation to record a new point
+                return; // Not enough movement to add a new point
             }
         }
-
-        double defaultSpeed = 1.0; // Default speed set to 1.0
-
-        // Use the established base offset from the first node
-        Vec3 startPos = currentNodes.getFirst().pos;
-
-        // Create new node data
+        
+        if (recording) {
+            // For recording, use the dedicated method that always uses duration
+            addRecordedPoint(playerPos, yaw, pitch, roll, fov);
+            return;
+        }
+        
+        // For manual points, use speed
         CameraPathRenderer.NodeData newNode = new CameraPathRenderer.NodeData(
-                playerPos,
-                yaw,
-                pitch,
-                roll,
-                fov,
-                defaultSpeed, // Default speed
-                currentNodes.size(), // Next index
-                0,   // No pause
-                EasingType.LINEAR,
-                "curved"
+            playerPos,
+            yaw,
+            pitch,
+            roll,
+            fov,
+            currentNodes.size(),
+            EasingType.LINEAR,
+            "curved"
         );
-
+        
+        // Set speed and ensure no duration is set for manual points
+        newNode.setSpeed(1.0);
+        newNode.setDuration(null);
+        
         currentNodes.add(newNode);
         CameraPathRenderer.setDirty(true);
         
@@ -485,19 +580,9 @@ public class SimpleCameraManager {
         lastRecordedYaw = yaw;
         lastRecordedPitch = pitch;
         hasLastRecorded = true;
-        lastRecordedYaw = yaw;
-        lastRecordedPitch = pitch;
-        hasLastRecorded = true;
-
-        // Notify the user (but only if not the first point to avoid spam)
+        
         if (currentNodes.size() > 1) {
-            MC.player.displayClientMessage(Component.literal("§aAdded Node " + newNode.index + " to active path: " + activeId.getPath()), true);
-        }
-    }
-
-    public static void sendError(String message) {
-        if (MC.player != null) {
-            MC.player.displayClientMessage(Component.literal("§c[Sandbox Cutscenes] " + message), false);
+            MC.player.displayClientMessage(Component.literal("Added point #" + (currentNodes.size() - 1) + " (Speed: " + newNode.getSpeed() + ")"), true);
         }
     }
 
@@ -618,7 +703,40 @@ public class SimpleCameraManager {
             Vec3 p3 = i >= data.points.size() - 1 ? targetPos : new Vec3(data.points.get(i+1).x + baseOffset.x, data.points.get(i+1).y + baseOffset.y, data.points.get(i+1).z + baseOffset.z);
 
             synchronized (MOVE_LOCK) {
-                MOVE_QUEUE.add(new QueuedMove(targetPos, p.yaw, p.pitch, p.roll, p.fov, p.speed, p.pause, p.easing, p.movement, p0, p3, parseEventList(p.event)));
+                // Use duration for recorded points, speed for manual points
+                if (p.getDuration() != null) {
+                    // For recorded points, use withDuration
+                    MOVE_QUEUE.add(QueuedMove.withDuration(
+                        targetPos,
+                        p.yaw,
+                        p.pitch,
+                        p.roll,
+                        p.fov,
+                        p.getDuration(), // duration in ms
+                        p.pause, // post delay
+                        p.easing != null ? p.easing : EasingType.LINEAR,
+                        p.movement != null ? p.movement : "linear",
+                        p0,
+                        p3,
+                        List.of(String.valueOf(p.event))
+                    ));
+                } else {
+                    // For manual points, use withSpeed
+                    MOVE_QUEUE.add(QueuedMove.withSpeed(
+                        targetPos,
+                        p.yaw,
+                        p.pitch,
+                        p.roll,
+                        p.fov,
+                        p.getSpeed() != null ? p.getSpeed() : 1.0, // speed in blocks per second
+                        p.pause, // post delay
+                        p.easing != null ? p.easing : EasingType.LINEAR,
+                        p.movement != null ? p.movement : "linear",
+                        p0,
+                        p3,
+                        List.of(String.valueOf(p.event))
+                    ));
+                }
                 if (!isMoving) {
                     processNextMove();
                 }
@@ -626,30 +744,6 @@ public class SimpleCameraManager {
         }
 
         pendingDisable = true;
-    }
-
-    public static void enable() {
-        synchronized (MOVE_LOCK) {
-            if (active && camera != null) return;
-            active = true;
-        }
-
-        camera = new SimpleCameraEntity(CAMERA_ENTITY_ID);
-        camera.apply(MC.player.position(), MC.player.getYRot(), MC.player.getXRot());
-        camera.spawn();
-        MC.setCameraEntity(camera);
-    }
-
-    public static void disable() {
-        if (!active || MC.player == null) return;
-
-        synchronized (MOVE_LOCK) {
-            if (isMoving) {
-                pendingDisable = true;
-                return;
-            }
-        }
-        performDisable();
     }
 
     public static boolean isActive() { return active; }
@@ -682,10 +776,6 @@ public class SimpleCameraManager {
         currentPitch = pitch;
     }
 
-    private static void apply(double x, double y, double z, float yaw, float pitch) {
-        apply(new Vec3(x, y, z), yaw, pitch);
-    }
-
     private static void apply(Vec3 pos, float yaw, float pitch, float roll, float fov) {
         setPosition(pos);
         setRotation(yaw, pitch);
@@ -695,24 +785,11 @@ public class SimpleCameraManager {
         currentFov = Mth.clamp(fov, 0.0f, 1.0f);
     }
 
-    private static void apply(double x, double y, double z, float yaw, float pitch, float roll, float fov) {
-        apply(new Vec3(x, y, z), yaw, pitch, roll, fov);
-    }
-
     public static float getYaw() { return currentYaw; }
     public static float getPitch() { return currentPitch; }
     public static float getRoll() { return currentRoll; }
     public static float getFov() { return currentFov; }
     public static SimpleCameraEntity getCamera() { return camera; }
-
-    private static void moveTo(Vec3 pos, float yaw, float pitch, float roll, float fov, double speed, long postMoveDelayMs, EasingType easing) {
-        synchronized (MOVE_LOCK) {
-            MOVE_QUEUE.add(new QueuedMove(pos, yaw, pitch, roll, fov, speed, postMoveDelayMs, easing, "linear", null, null, null));
-            if (!isMoving) {
-                processNextMove();
-            }
-        }
-    }
 
     /* ---------------- Queue / Movement ---------------- */
 
@@ -724,7 +801,15 @@ public class SimpleCameraManager {
             }
             if (now >= nextRecordTick) {
                 if (hasActivePaths() && !isActive()) {
-                    addNodeAtPlayer();
+                    if (MC.player != null) {
+                        addRecordedPoint(
+                                MC.player.position(),
+                                MC.player.getYRot(),
+                                MC.player.getXRot(),
+                                0, // roll
+                                1.0f // fov
+                        );
+                    }
                 }
                 int interval = Config.RECORDING_INTERVAL_TICKS.get();
                 nextRecordTick = now + Math.max(1, interval);
@@ -842,10 +927,10 @@ public class SimpleCameraManager {
             // Calculate precise time with partial tick
             double currentTickProgress = (MC.gui.getGuiTicks() - moveStartTick) + partialTick;
             double t = Mth.clamp(currentTickProgress / moveDurationTicks, 0.0, 1.0);
-            
+
             // Apply easing with optional overshoot for smoother transitions
             double easedT = moveEasing.ease(t);
-            
+
             // Interpolate position
             Vec3 newPos;
             if ("curved".equals(moveType) && moveP0 != null && moveP3 != null) {
@@ -891,7 +976,7 @@ public class SimpleCameraManager {
 
         // Store events to fire upon arrival
         activeMoveEvents = move.eventNames;
-        
+
         // Get current position precisely
         moveStartPos = camera.position();
         moveStartYaw = currentYaw;
@@ -916,11 +1001,20 @@ public class SimpleCameraManager {
             return;
         }
 
-        // Calculate duration based on speed and recording interval from config
-        // speed 1.0 = 1x recording interval, 0.5 = half the interval, 2.0 = double, etc.
-        // This ensures smooth movement that matches the recording timing
-        int baseTicks = Config.RECORDING_INTERVAL_TICKS.get();
-        moveDurationTicks = Math.max(1, (int)(baseTicks / move.speed));
+        // Calculate duration based on whether this is a recorded point (duration) or manual point (speed)
+        if (move.duration != null) {
+            // For recorded points: use the specified duration (converting ms to ticks)
+            moveDurationTicks = (int)(move.duration / 50);
+        } else {
+            // For manual points: calculate duration based on speed and distance
+            // speed 1.0 = 1 block per second, 2.0 = 2 blocks per second, etc.
+            double blocksPerSecond = move.speed; // No additional scaling for more intuitive control
+            moveDurationTicks = Math.max(1, (int)((distance / blocksPerSecond) * 20)); // Convert seconds to ticks
+        }
+
+        // Ensure minimum duration of 1 tick to avoid division by zero
+        moveDurationTicks = Math.max(1, moveDurationTicks);
+
         moveStartTick = MC.gui.getGuiTicks();
         moveEasing = move.easing != null ? move.easing : EasingType.EASE_IN_OUT; // Default to ease in/out for smooth transitions
         moveType = move.movement != null ? move.movement : "linear";
@@ -929,15 +1023,15 @@ public class SimpleCameraManager {
 
         // Schedule any post-move delay
         pauseEndTick = move.postDelay > 0 ? moveStartTick + moveDurationTicks + (int)(move.postDelay / 50) : 0;
-        
+
         // Mark as moving
         isMoving = true;
-        
+
         // Immediately update to the first frame of movement to prevent any delay
         if (moveDurationTicks > 0) {
             double t = 1.0 / moveDurationTicks; // Very small step for first frame
             double easedT = moveEasing.ease(t);
-            
+
             // Calculate first frame position
             Vec3 newPos;
             if ("curved".equals(moveType) && moveP0 != null && moveP3 != null) {
@@ -946,30 +1040,18 @@ public class SimpleCameraManager {
             } else {
                 newPos = moveStartPos.lerp(moveTargetPos, easedT);
             }
-            
+
             // Calculate first frame rotation
             float newYaw = lerpAngle(moveStartYaw, moveTargetYaw, (float)easedT);
             float newPitch = Mth.lerp((float)easedT, moveStartPitch, moveTargetPitch);
             float newRoll = Mth.lerp((float)easedT, moveStartRoll, moveTargetRoll);
             float newFov = Mth.lerp((float)easedT, moveStartFov, moveTargetFov);
-            
+
             // Apply the first frame immediately
             apply(newPos, newYaw, newPitch, newRoll, newFov);
         } else {
             // If duration is 0, jump to target
             apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
-        }
-    }
-
-    private static void finishMove() {
-        isMoving = false;
-        // Ensure we're exactly at the target position
-        if (moveTargetPos != null) {
-            apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
-        }
-        // Reset pause timer if it's in the past
-        if (pauseEndTick > 0 && MC.gui.getGuiTicks() >= pauseEndTick) {
-            pauseEndTick = 0;
         }
     }
 
@@ -1004,7 +1086,7 @@ public class SimpleCameraManager {
                 pendingDisable = false;
                 moveTargetPos = null;
             }
-            
+
             // Fire the cutscene finished event
             if (finishedCutsceneId != null) {
                 CutsceneFinishedEvent event = new CutsceneFinishedEvent(finishedCutsceneId, source);
@@ -1193,9 +1275,9 @@ public class SimpleCameraManager {
 
         private final Function<Double, Double> func;
         EasingType(Function<Double, Double> func) { this.func = func; }
-        public double ease(double t) { 
+        public double ease(double t) {
             t = Math.min(1.0, Math.max(0.0, t));
-            return func.apply(t); 
+            return func.apply(t);
         }
     }
 
@@ -1249,7 +1331,8 @@ public class SimpleCameraManager {
                 p.z = node.pos.z - startNode.pos.z;
                 p.yaw = node.yaw;
                 p.pitch = node.pitch;
-                p.speed = node.speed;
+                p.setSpeed(node.getSpeed());
+                p.setDuration(node.getDuration());
                 p.pause = node.pause;
                 p.easing = node.easing;
                 p.movement = node.movement;

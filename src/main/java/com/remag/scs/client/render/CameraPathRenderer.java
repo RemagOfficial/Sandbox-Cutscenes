@@ -64,7 +64,11 @@ public class CameraPathRenderer {
         public Vec3 lookAt; // New field
         public float roll;
         public float fov;
-        public NodeData(Vec3 pos, float yaw, float pitch, float roll, float fov, double speed, int index, long pause, SimpleCameraManager.EasingType easing, String movement) {
+        private Long duration = null; // Only for recorded points (ms)
+        
+        // For manual points (with speed)
+        public NodeData(Vec3 pos, float yaw, float pitch, float roll, float fov, Double speed, int index, 
+                       long pause, SimpleCameraManager.EasingType easing, String movement) {
             this.pos = pos;
             this.yaw = yaw;
             this.pitch = pitch;
@@ -75,15 +79,44 @@ public class CameraPathRenderer {
             this.pause = pause;
             this.easing = easing;
             this.movement = movement;
+            this.duration = null; // Ensure duration is null for manual points
+        }
+
+        // For recorded points (with duration)
+        public NodeData(Vec3 pos, float yaw, float pitch, float roll, float fov,
+                       int index, SimpleCameraManager.EasingType easing, String movement) {
+            this.pos = pos;
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.roll = roll;
+            this.fov = fov;
+            this.speed = null; // Changed from 1.0 to null to indicate duration-mode
+            this.index = index;
+            this.pause = 0; // No pause for recorded points
+            this.easing = easing;
+            this.movement = movement;
+            this.duration = 0L; // Will be set explicitly after construction
+        }
+
+        // Getters and setters
+        public Double getSpeed() {
+            return speed;
+        }
+
+        public Long getDuration() {
+            return duration;
         }
 
         // Add setters since we'll be editing these
         public Vec3 pos;
-        public double speed;
+        public Double speed;
         public float yaw;
         public float pitch;
         public void setPos(Vec3 pos) { this.pos = pos; }
-        public void setSpeed(double speed) { this.speed = speed; }
+
+        public void setSpeed(Double speed) { this.speed = speed; }
+        public void setDuration(Long duration) { this.duration = duration; }
+
         public void setRotation(float yaw, float pitch, float roll, float fov) {
             this.yaw = yaw; this.pitch = pitch; this.roll = roll; this.fov = fov;
         }
@@ -293,7 +326,7 @@ public class CameraPathRenderer {
         for (EventNode event : TIMED_EVENTS) {
             float size = (event == hoveredEvent) ? 0.15f : 0.08f;
             drawBox(matrix, event.pos, size, 0, 255, 100, 200); // Bright Green
-            
+
             // Faint vertical line to path
             Tesselator lineTess = Tesselator.getInstance();
             BufferBuilder line = lineTess.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
@@ -323,7 +356,7 @@ public class CameraPathRenderer {
             // Draw Nodes
             for (int i = 0; i < pathNodes.size(); i++) {
                 NodeData node = pathNodes.get(i);
-                
+
                 // Draw Event icon above node if assigned
                 if (node.events != null && !node.events.isEmpty()) {
                     Vec3 eventVisualPos = node.pos.add(0, 0.5, 0);
@@ -332,7 +365,7 @@ public class CameraPathRenderer {
                     // Color code: Purple for multiple, Green for single
                     int r = 0, g = 255, b = 100;
                     if (node.events.size() > 1) { r = 200; g = 50; b = 255; }
-                    
+
                     drawBox(matrix, eventVisualPos, size, r, g, b, 255);
                 }
 
@@ -343,7 +376,7 @@ public class CameraPathRenderer {
 
             float baseSize = isStart ? 0.2f : 0.1f;
             float finalSize = baseSize * node.currentScale; // Apply smooth scale
-            
+
             int r, g, b;
             if (isStart) {
                 r = 0; g = 255; b = 0; // Green

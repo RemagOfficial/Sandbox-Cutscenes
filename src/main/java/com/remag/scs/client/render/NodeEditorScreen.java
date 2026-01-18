@@ -70,7 +70,7 @@ public class NodeEditorScreen extends Screen {
         }).bounds(centerX + 60, startY + spacing * 4, 80, 20).build());
 
         speedEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 7, fieldWidth, fieldHeight, Component.literal("Speed")));
-        speedEdit.setValue(String.format("%.2f", node.speed));
+        speedEdit.setValue(node.speed != null ? String.format("%.2f", node.speed) : "0.00");
 
         pauseEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 8, fieldWidth, fieldHeight, Component.literal("Pause")));
         pauseEdit.setValue(String.valueOf(node.pause));
