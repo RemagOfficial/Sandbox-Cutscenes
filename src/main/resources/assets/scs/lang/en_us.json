@@ -3,5 +3,18 @@
   "key.scs.rerun": "Rerun Last Cutscene",
   "key.scs.add_node": "Add Camera Node",
   "key.scs.save": "Save Active Path",
-  "key.scs.clear": "Clear All Previews"
+  "key.scs.clear": "Clear All Previews",
+  "key.scs.timed_events": "Open Timed Events Editor",
+  "key.scs.prop_camera": "Toggle Prop Camera Playback",
+
+  "config.scs.developer.developerMode": "Developer Mode",
+  "config.scs.developer.showPropCameraFrustum": "Show Prop Camera Frustum",
+  "config.scs.recording.recordingToolItem": "Recording Tool Item",
+  "config.scs.recording.recordingIntervalTicks": "Recording Interval (Ticks)",
+  "config.scs.recording.instantRecordingMovement": "Instant Recording Movement",
+  "config.scs.recording.positionThreshold": "Position Threshold",
+  "config.scs.recording.rotationThreshold": "Rotation Threshold",
+
+  "scs.configuration.developer": "Developer",
+  "scs.configuration.recording": "Recording"
 }

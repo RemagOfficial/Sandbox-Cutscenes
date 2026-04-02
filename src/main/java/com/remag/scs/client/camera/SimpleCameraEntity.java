@@ -56,6 +56,7 @@ public class SimpleCameraEntity extends LocalPlayer {
         setId(id);
         setPose(Pose.STANDING);
         // setClientLoaded(true);
+        this.noPhysics = true;
         getAbilities().flying = true;
         input = new KeyboardInput(MC.options);
     }
@@ -124,6 +125,31 @@ public class SimpleCameraEntity extends LocalPlayer {
     @Override
     public boolean canCollideWith(Entity other) {
         return false;
+    }
+
+    @Override
+    public boolean canBeCollidedWith() {
+        return false;
+    }
+
+    @Override
+    public boolean isPushable() {
+        return false;
+    }
+
+    @Override
+    public void push(Entity entity) {
+        // Prevent entity-on-entity pushes with the prop camera.
+    }
+
+    @Override
+    public void push(double x, double y, double z) {
+        // Ignore external push impulses.
+    }
+
+    @Override
+    protected void pushEntities() {
+        // Never push nearby entities.
     }
 
     @Override

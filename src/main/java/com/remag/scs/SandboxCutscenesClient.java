@@ -2,6 +2,7 @@ package com.remag.scs;
 
 import com.remag.scs.client.render.CameraPathRenderer;
 import com.remag.scs.client.camera.SimpleCameraManager;
+import com.remag.scs.client.render.EventEditorScreen;
 import com.remag.scs.client.render.NodeEditorScreen;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -9,6 +10,7 @@ import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
 import net.minecraft.world.phys.Vec3;
@@ -25,6 +27,8 @@ import net.neoforged.neoforge.client.gui.ConfigurationScreen;
 import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import org.lwjgl.glfw.GLFW;
 import com.remag.scs.client.camera.CutsceneFinishedEvent;
+
+import java.util.List;
 
 // This class will not load on dedicated servers. Accessing client side code from here is safe.
 @Mod(value = SandboxCutscenes.MODID, dist = Dist.CLIENT)
@@ -56,6 +60,18 @@ public class SandboxCutscenesClient {
             "key.categories.scs"
     );
 
+    public static final KeyMapping OPEN_TIMED_EVENTS = new KeyMapping(
+            "key.scs.timed_events",
+            GLFW.GLFW_KEY_J,
+            "key.categories.scs"
+    );
+
+    public static final KeyMapping TOGGLE_PROP_CAMERA = new KeyMapping(
+            "key.scs.prop_camera",
+            GLFW.GLFW_KEY_B,
+            "key.categories.scs"
+    );
+
     public SandboxCutscenesClient(ModContainer container) {
         // Allows NeoForge to create a config screen for this mod's configs.
         // The config screen is accessed by going to the Mods screen > clicking on your mod > clicking on config.
@@ -74,6 +90,8 @@ public class SandboxCutscenesClient {
             event.register(ADD_NODE);
             event.register(SAVE_PATH);
             event.register(CLEAR_RENDER);
+            event.register(OPEN_TIMED_EVENTS);
+            event.register(TOGGLE_PROP_CAMERA);
         }
     }
 
@@ -99,6 +117,14 @@ public class SandboxCutscenesClient {
                 SimpleCameraManager.saveCurrentPath();
             }
 
+            while (TOGGLE_PROP_CAMERA.consumeClick()) {
+                if (!SimpleCameraManager.hasActivePaths()) {
+                    mc.player.displayClientMessage(Component.literal("§c[Sandbox Cutscenes] No path previewed."), true);
+                    continue;
+                }
+                SimpleCameraManager.togglePreviewPlayback();
+            }
+
             while (CLEAR_RENDER.consumeClick()) {
                 if (SimpleCameraManager.hasActivePaths()) {
                     long currentTime = System.currentTimeMillis();
@@ -106,6 +132,9 @@ public class SandboxCutscenesClient {
                         mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§6[Sandbox Cutscenes] You have unsaved changes! Press again to confirm clear."), true);
                         lastClearAttempt = currentTime;
                     } else {
+                        if (SimpleCameraManager.isPreviewPlaybackActive()) {
+                            SimpleCameraManager.togglePreviewPlayback();
+                        }
                         CameraPathRenderer.clear();
                         mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§a[Sandbox Cutscenes] Cleared all previews."), true);
                         lastClearAttempt = 0;
@@ -113,6 +142,17 @@ public class SandboxCutscenesClient {
                 } else {
                     mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c[Sandbox Cutscenes] No paths are currently previewed."), true);
                 }
+            }
+
+            while (OPEN_TIMED_EVENTS.consumeClick()) {
+                if (!SimpleCameraManager.hasActivePaths()) {
+                    mc.player.displayClientMessage(Component.literal("§c[Sandbox Cutscenes] No path previewed."), true);
+                    continue;
+                }
+
+                List<String> timedNames = SimpleCameraManager.getTimedEventNames();
+                String initialTimed = timedNames.isEmpty() ? null : timedNames.getFirst();
+                mc.setScreen(new EventEditorScreen(initialTimed));
             }
         }
 
@@ -122,7 +162,7 @@ public class SandboxCutscenesClient {
 
     @SubscribeEvent
     public static void onRenderFrame(RenderFrameEvent.Pre event) {
-        if (SimpleCameraManager.isActive()) {
+        if (SimpleCameraManager.isActive() || SimpleCameraManager.isPreviewPlaybackActive()) {
             SimpleCameraManager.renderTick(Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false));
         }
     }
@@ -170,6 +210,9 @@ public class SandboxCutscenesClient {
                 )
                 .then(Commands.literal("clear")
                         .executes(context -> {
+                            if (SimpleCameraManager.isPreviewPlaybackActive()) {
+                                SimpleCameraManager.togglePreviewPlayback();
+                            }
                             CameraPathRenderer.clear();
                             SimpleCameraManager.previewCutscene(null, null); // Clear tracked location
                             return 1;
@@ -218,31 +261,47 @@ public class SandboxCutscenesClient {
         }
         SimpleCameraManager.renderFade(event.getGuiGraphics());
         SimpleCameraManager.renderTextures(event.getGuiGraphics());
+        SimpleCameraManager.renderEditorOverlay(event.getGuiGraphics());
     }
 
     @SubscribeEvent
     public static void onInput(InputEvent.MouseButton.Pre event) {
-        if (!Config.DEVELOPER_MODE.get() || !CameraPathRenderer.isVisible() || SimpleCameraManager.isActive()) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (!Config.DEVELOPER_MODE.get() || !CameraPathRenderer.isVisible() || SimpleCameraManager.isActive() || mc.screen != null) return;
 
         if (event.getButton() == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
             if (event.getAction() == GLFW.GLFW_PRESS) {
-                // Check if Shift is held (either Left or Right Shift)
-                long window = Minecraft.getInstance().getWindow().getWindow();
-                boolean isShiftDown = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS ||
-                                     GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
-                
-                if (isShiftDown) {
-                    CameraPathRenderer.startDragging();
+                boolean isNodeInteraction = CameraPathRenderer.getHoveredNode() != null || CameraPathRenderer.isDragging();
+                boolean isSneaking = mc.player != null && mc.player.isShiftKeyDown();
+
+                if (isNodeInteraction) {
+                    // Always consume node left-clicks so they do not hit blocks behind the node.
+                    event.setCanceled(true);
                 }
-            } else if (event.getAction() == GLFW.GLFW_RELEASE) {
-                CameraPathRenderer.stopDragging();
+
+                if (isSneaking) {
+                    boolean wasDragging = CameraPathRenderer.isDragging();
+                    boolean nowDragging = CameraPathRenderer.toggleDragging();
+
+
+                    if (mc.player != null) {
+                        if (wasDragging && !nowDragging) {
+                            mc.player.displayClientMessage(Component.literal("§aStopped moving node."), true);
+                        } else if (nowDragging) {
+                            CameraPathRenderer.NodeData hovered = CameraPathRenderer.getHoveredNode();
+                            String nodeLabel = hovered != null ? String.valueOf(hovered.index) : "";
+                            mc.player.displayClientMessage(Component.literal("§aMoving node " + nodeLabel + " (click again to stop, scroll to change distance)."), true);
+                        } else {
+                            mc.player.displayClientMessage(Component.literal("§eSneak and left-click a node to move it."), true);
+                        }
+                    }
+                }
             }
         }
         
         if (event.getButton() == GLFW.GLFW_MOUSE_BUTTON_RIGHT && event.getAction() == GLFW.GLFW_PRESS) {
             // Recording tool takes priority so you can always toggle recording,
             // even if a node/event is currently hovered.
-            Minecraft mc = Minecraft.getInstance();
             if (mc.player != null) {
                 ItemStack held = mc.player.getMainHandItem();
                 String heldId = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
@@ -256,7 +315,12 @@ public class SandboxCutscenesClient {
 
             // Preserve existing editor right-click behaviors
             if (CameraPathRenderer.getHoveredEvent() != null) {
-                CameraPathRenderer.handleRightClick();
+                CameraPathRenderer.EventNode hoveredEvent = CameraPathRenderer.getHoveredEvent();
+                if (hoveredEvent.sourceNode() != null) {
+                    Minecraft.getInstance().setScreen(new EventEditorScreen(hoveredEvent.sourceNode(), hoveredEvent.selectedEventName()));
+                } else {
+                    Minecraft.getInstance().setScreen(new EventEditorScreen(hoveredEvent.name()));
+                }
                 event.setCanceled(true); // Prevent item use
                 return;
             }
@@ -266,6 +330,19 @@ public class SandboxCutscenesClient {
                 event.setCanceled(true); // Prevent item use
                 return;
             }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onMouseScroll(InputEvent.MouseScrollingEvent event) {
+        Minecraft mc = Minecraft.getInstance();
+        if (!Config.DEVELOPER_MODE.get() || !CameraPathRenderer.isVisible() || SimpleCameraManager.isActive() || mc.screen != null) return;
+        if (!CameraPathRenderer.isDragging()) return;
+
+        double updatedDistance = CameraPathRenderer.adjustDragDistance(event.getScrollDeltaY() * 0.25);
+        event.setCanceled(true);
+        if (mc.player != null) {
+            mc.player.displayClientMessage(Component.literal(String.format("§bNode distance: %.2f", updatedDistance)), true);
         }
     }
 }

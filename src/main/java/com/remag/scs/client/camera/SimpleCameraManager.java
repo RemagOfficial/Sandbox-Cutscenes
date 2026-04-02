@@ -4,15 +4,15 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.annotations.SerializedName;
-import com.remag.scs.SandboxCutscenes;
+import com.remag.scs.SandboxCutscenesClient;
 import com.remag.scs.client.render.CameraPathRenderer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.util.Mth;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.neoforged.neoforge.common.NeoForge;
@@ -38,7 +38,6 @@ import com.google.gson.JsonObject;
 import com.remag.scs.Config;
 import net.minecraft.client.gui.GuiGraphics;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.google.gson.GsonBuilder;
 
 public class SimpleCameraManager {
 
@@ -65,7 +64,11 @@ public class SimpleCameraManager {
     private static SimpleCameraEntity camera;
     private static boolean active = false;
     private static final int CAMERA_ENTITY_ID = -420;
-    
+    private static final int PROP_CAMERA_ENTITY_ID = -421;
+    private static boolean previewPlaybackActive = false;
+    private static int previewPlaybackStartTick = -1;
+    private static long previewPlaybackTotalMs = 0L;
+
     private static ResourceLocation currentPreviewLocation;
     private static Vec3 previewBaseOffset = Vec3.ZERO;
     private static Vec3 activeBaseOffset = Vec3.ZERO; // Track world origin of running cutscene
@@ -114,6 +117,8 @@ public class SimpleCameraManager {
     // Event system state
     private static final Map<String, CutsceneData.Event> NAMED_EVENTS = new HashMap<>();
     private static final List<CutsceneData.Event> PENDING_TIMED_EVENTS = new ArrayList<>();
+    private static final int TIMELINE_MARKER_GREEN = 0xFF00FF64;
+    private static final int TIMELINE_MARKER_PURPLE = 0xFFC832FF;
     private static int cutsceneStartTick;
     private static List<String> activeMoveEvents; // Updated to List
     private static net.minecraft.world.entity.player.ChatVisiblity originalChatVisibility;
@@ -144,6 +149,8 @@ public class SimpleCameraManager {
         }
     }
     private record ActiveTexture(ResourceLocation texture, int x, int y, float scale, int startTick, int durationTicks, String fadeMode, boolean centered) {}
+    private record OverlayEntry(Component text, int color) {}
+    private record DurationMarker(long timeMs, int order, int color, int count) {}
 
     private record QueuedMove(Vec3 pos, float yaw, float pitch, float roll, float fov, 
                             double speed, // For manual movement speed (blocks per second)
@@ -343,6 +350,368 @@ public class SimpleCameraManager {
 
     public record EventInfo(String type, String data) {}
 
+    public record EventDefinition(String name, String type, String dataJson) {}
+
+    public record RemoveEventResult(boolean removed, boolean nodeRemoved, String nextEventName) {}
+
+    public record RemoveTimedEventResult(boolean removed, String nextEventName) {}
+
+    private static List<CutsceneData.Event> ensureEventStore() {
+        if (originalEvents == null) {
+            originalEvents = new ArrayList<>();
+        }
+        return originalEvents;
+    }
+
+    public static List<String> getNodeEventNames(CameraPathRenderer.NodeData node) {
+        if (node == null || node.events == null) return new ArrayList<>();
+        return new ArrayList<>(node.events);
+    }
+
+    public static EventDefinition getEventDefinition(String name) {
+        if (name == null || name.isBlank()) {
+            return new EventDefinition("", "command", "{}");
+        }
+        for (CutsceneData.Event e : ensureEventStore()) {
+            if (name.equals(e.name)) {
+                JsonObject dataObj = e.data != null ? e.data : e.eventData;
+                return new EventDefinition(
+                        e.name,
+                        e.type != null ? e.type : "command",
+                        dataObj != null ? GSON.toJson(dataObj) : "{}"
+                );
+            }
+        }
+        return new EventDefinition(name, "command", "{}");
+    }
+
+    public static String addEventToNode(CameraPathRenderer.NodeData node) {
+        if (node == null) return "";
+        if (node.events == null) {
+            node.events = new ArrayList<>();
+        }
+
+        String base = "event_" + node.index + "_" + (node.events.size() + 1);
+        String candidate = base;
+        int suffix = 1;
+        while (findEventByName(candidate) != null) {
+            candidate = base + "_" + suffix;
+            suffix++;
+        }
+
+        CutsceneData.Event created = new CutsceneData.Event();
+        created.name = candidate;
+        created.type = "command";
+        created.data = new JsonObject();
+        ensureEventStore().add(created);
+        node.events.add(candidate);
+        CameraPathRenderer.setDirty(true);
+        return candidate;
+    }
+
+    public static List<String> getTimedEventNames() {
+        List<String> names = new ArrayList<>();
+        for (CutsceneData.Event e : ensureEventStore()) {
+            if (e.time != null && e.name != null && !e.name.isBlank()) {
+                names.add(e.name);
+            }
+        }
+        return names;
+    }
+
+    public static String addTimedEvent() {
+        String base = "timed_event_";
+        int idx = 1;
+        String candidate = base + idx;
+        while (findEventByName(candidate) != null) {
+            idx++;
+            candidate = base + idx;
+        }
+
+        CutsceneData.Event created = new CutsceneData.Event();
+        created.name = candidate;
+        created.type = "command";
+        created.time = 0L;
+        created.data = new JsonObject();
+        ensureEventStore().add(created);
+        CameraPathRenderer.setDirty(true);
+        refreshTimedEventVisuals();
+        return candidate;
+    }
+
+    public static long getTimedEventTimeMs(String name) {
+        CutsceneData.Event e = findEventByName(name);
+        if (e == null || e.time == null) {
+            return 0L;
+        }
+        return Math.max(0L, e.time);
+    }
+
+    public static boolean saveTimedEventDefinition(String originalName, String newName, long timeMs, String type, String dataJson) {
+        if (originalName == null || originalName.isBlank()) {
+            return false;
+        }
+
+        String safeNewName = newName == null || newName.isBlank() ? originalName : newName.trim();
+        String safeType = type == null || type.isBlank() ? "command" : type.trim().toLowerCase();
+        long safeTime = Math.max(0L, timeMs);
+
+        CutsceneData.Event existing = findEventByName(safeNewName);
+        if (!safeNewName.equals(originalName) && existing != null) {
+            sendError("Event name already exists: " + safeNewName);
+            return false;
+        }
+
+        JsonObject parsedData;
+        try {
+            parsedData = GSON.fromJson(dataJson == null || dataJson.isBlank() ? "{}" : dataJson, JsonObject.class);
+            if (parsedData == null) parsedData = new JsonObject();
+        } catch (Exception e) {
+            sendError("Event data must be valid JSON object.");
+            return false;
+        }
+
+        CutsceneData.Event event = findEventByName(originalName);
+        if (event == null) {
+            event = new CutsceneData.Event();
+            ensureEventStore().add(event);
+        }
+
+        event.name = safeNewName;
+        event.type = safeType;
+        event.time = safeTime;
+        event.data = parsedData;
+        event.eventData = null;
+
+        CameraPathRenderer.setDirty(true);
+        refreshTimedEventVisuals();
+        return true;
+    }
+
+    public static RemoveTimedEventResult removeTimedEvent(String eventName) {
+        if (eventName == null || eventName.isBlank()) {
+            return new RemoveTimedEventResult(false, null);
+        }
+
+        List<String> timedNames = getTimedEventNames();
+        int removedIndex = timedNames.indexOf(eventName);
+        if (removedIndex == -1 || originalEvents == null) {
+            return new RemoveTimedEventResult(false, null);
+        }
+
+        originalEvents.removeIf(event -> eventName.equals(event.name) && event.time != null);
+        CameraPathRenderer.setDirty(true);
+        refreshTimedEventVisuals();
+
+        List<String> remaining = getTimedEventNames();
+        if (remaining.isEmpty()) {
+            return new RemoveTimedEventResult(true, null);
+        }
+
+        int nextIndex = Math.min(removedIndex, remaining.size() - 1);
+        return new RemoveTimedEventResult(true, remaining.get(nextIndex));
+    }
+
+    public static long getActiveCutsceneLengthMs() {
+        List<CameraPathRenderer.NodeData> nodes = CameraPathRenderer.getPathNodes();
+        if (nodes.size() < 2) {
+            return 0L;
+        }
+
+        long totalTicks = 0L;
+        for (int i = 0; i < nodes.size() - 1; i++) {
+            CameraPathRenderer.NodeData start = nodes.get(i);
+            CameraPathRenderer.NodeData end = nodes.get(i + 1);
+
+            totalTicks += getSegmentDurationTicks(start, end);
+            totalTicks += getPauseTicks(end.pause);
+        }
+
+        return Math.max(0L, totalTicks * 50L);
+    }
+
+    private static int getSegmentDurationTicks(CameraPathRenderer.NodeData start, CameraPathRenderer.NodeData end) {
+        if (end.getDuration() != null) {
+            return Math.max(1, (int) (end.getDuration() / 50L));
+        }
+
+        double speed = end.getSpeed() != null ? end.getSpeed() : 1.0;
+        double dist = start.pos.distanceTo(end.pos);
+        return Math.max(1, (int) ((dist / speed) * 20.0));
+    }
+
+    private static int getPauseTicks(long pauseMs) {
+        return Math.max(0, (int) (pauseMs / 50L));
+    }
+
+    private static int getMarkerColor(int eventCount) {
+        return eventCount > 1 ? TIMELINE_MARKER_PURPLE : TIMELINE_MARKER_GREEN;
+    }
+
+    public static boolean isPreviewPlaybackActive() {
+        return previewPlaybackActive;
+    }
+
+    public static long getPreviewPlaybackTotalMs() {
+        long total = previewPlaybackActive ? previewPlaybackTotalMs : getActiveCutsceneLengthMs();
+        return Math.max(0L, total);
+    }
+
+    public static long getPreviewPlaybackElapsedMs() {
+        if (!previewPlaybackActive || MC.gui == null || previewPlaybackStartTick < 0) {
+            return 0L;
+        }
+
+        float partial = MC.getTimer().getGameTimeDeltaPartialTick(false);
+        long elapsed = Math.round(Math.max(0.0f, ((MC.gui.getGuiTicks() + partial) - previewPlaybackStartTick) * 50.0f));
+        if (previewPlaybackTotalMs > 0L) {
+            elapsed = Math.min(previewPlaybackTotalMs, elapsed);
+        }
+        return elapsed;
+    }
+
+    public static float getPreviewPlaybackProgress() {
+        long total = getPreviewPlaybackTotalMs();
+        if (total <= 0L) {
+            return 0.0f;
+        }
+        return Mth.clamp((float) getPreviewPlaybackElapsedMs() / (float) total, 0.0f, 1.0f);
+    }
+
+    public static void togglePreviewPlayback() {
+        if (active || pendingData != null) {
+            sendError("Stop the active cutscene before starting prop-camera playback.");
+            return;
+        }
+
+        if (previewPlaybackActive) {
+            stopPreviewPlayback(false);
+            if (MC.player != null) {
+                MC.player.displayClientMessage(Component.literal("§eStopped prop-camera playback."), true);
+            }
+            return;
+        }
+
+        startPreviewPlayback();
+    }
+
+    public static boolean saveEventDefinition(CameraPathRenderer.NodeData node, String originalName, String newName, String type, String dataJson) {
+        if (node == null || originalName == null || originalName.isBlank()) return false;
+
+        String safeNewName = newName == null || newName.isBlank() ? originalName : newName.trim();
+        String safeType = type == null || type.isBlank() ? "command" : type.trim().toLowerCase();
+
+        if (!safeNewName.equals(originalName) && findEventByName(safeNewName) != null) {
+            sendError("Event name already exists: " + safeNewName);
+            return false;
+        }
+
+        JsonObject parsedData;
+        try {
+            parsedData = GSON.fromJson(dataJson == null || dataJson.isBlank() ? "{}" : dataJson, JsonObject.class);
+            if (parsedData == null) parsedData = new JsonObject();
+        } catch (Exception e) {
+            sendError("Event data must be valid JSON object.");
+            return false;
+        }
+
+        CutsceneData.Event event = findEventByName(originalName);
+        if (event == null) {
+            event = new CutsceneData.Event();
+            ensureEventStore().add(event);
+        }
+
+        event.name = safeNewName;
+        event.type = safeType;
+        event.data = parsedData;
+        event.eventData = null;
+
+        if (node.events != null) {
+            for (int i = 0; i < node.events.size(); i++) {
+                if (originalName.equals(node.events.get(i))) {
+                    node.events.set(i, safeNewName);
+                }
+            }
+        }
+
+        CameraPathRenderer.setDirty(true);
+        return true;
+    }
+
+    public static RemoveEventResult removeEventFromNode(CameraPathRenderer.NodeData node, String eventName) {
+        if (node == null || node.events == null || node.events.isEmpty() || eventName == null || eventName.isBlank()) {
+            return new RemoveEventResult(false, false, null);
+        }
+
+        int removedIndex = node.events.indexOf(eventName);
+        if (removedIndex == -1) {
+            return new RemoveEventResult(false, false, null);
+        }
+
+        node.events.remove(removedIndex);
+        pruneUnusedEventDefinition(eventName);
+        CameraPathRenderer.setDirty(true);
+
+        if (node.events.isEmpty()) {
+            // Keep the camera position node; only remove the event assignment.
+            return new RemoveEventResult(true, false, null);
+        }
+
+        int nextIndex = Math.min(removedIndex, node.events.size() - 1);
+        return new RemoveEventResult(true, false, node.events.get(nextIndex));
+    }
+
+    private static void refreshTimedEventVisuals() {
+        CameraPathRenderer.clearTimedEventVisuals();
+
+        List<CameraPathRenderer.NodeData> nodes = CameraPathRenderer.getPathNodes();
+        if (nodes.isEmpty()) {
+            return;
+        }
+
+        for (CutsceneData.Event e : ensureEventStore()) {
+            if (e.time == null) {
+                continue;
+            }
+
+            Vec3 pathPos = estimatePositionAtTime(nodes, e.time);
+            JsonObject dataObj = e.data != null ? e.data : e.eventData;
+            String info = dataObj != null ? dataObj.toString() : "{}";
+            CameraPathRenderer.addTimedEventVisual(pathPos.add(0, 0.5, 0), e.name != null ? e.name : "Timed", e.type, info);
+        }
+    }
+
+    private static CutsceneData.Event findEventByName(String name) {
+        if (name == null) return null;
+        for (CutsceneData.Event e : ensureEventStore()) {
+            if (name.equals(e.name)) return e;
+        }
+        return null;
+    }
+
+    private static void pruneUnusedEventDefinition(String eventName) {
+        if (eventName == null || eventName.isBlank() || originalEvents == null) {
+            return;
+        }
+
+        for (List<CameraPathRenderer.NodeData> path : CameraPathRenderer.getAllPaths().values()) {
+            for (CameraPathRenderer.NodeData pathNode : path) {
+                if (pathNode.events != null && pathNode.events.contains(eventName)) {
+                    return;
+                }
+            }
+        }
+
+        if (originalStartEvents != null && originalStartEvents.contains(eventName)) {
+            return;
+        }
+        if (originalEndEvents != null && originalEndEvents.contains(eventName)) {
+            return;
+        }
+
+        originalEvents.removeIf(event -> eventName.equals(event.name) && event.time == null);
+    }
+
     public static EventInfo getEventInfo(String name) {
         if (originalEvents != null) {
             for (CutsceneData.Event e : originalEvents) {
@@ -365,6 +734,10 @@ public class SimpleCameraManager {
     }
 
     public static void previewCutscene(ResourceLocation location, Vec3 origin) {
+        if (previewPlaybackActive) {
+            stopPreviewPlayback(false);
+        }
+
         if (location == null) {
             return;
         }
@@ -427,6 +800,7 @@ public class SimpleCameraManager {
                 CameraPathRenderer.setPath(location, nodes);
 
                 // Calculate visual positions for timed events (Adjusted to 0.2 offset)
+                CameraPathRenderer.clearTimedEventVisuals();
                 if (data.events != null) {
                     for (CutsceneData.Event e : data.events) {
                         if (e.time == null) continue;
@@ -447,22 +821,271 @@ public class SimpleCameraManager {
 
     private static Vec3 estimatePositionAtTime(List<CameraPathRenderer.NodeData> nodes, long timeMs) {
         if (nodes.isEmpty()) return Vec3.ZERO;
-        long currentTime = 0;
+        int targetTicks = Math.max(0, (int) (timeMs / 50L));
+        int currentTicks = 0;
 
         for (int i = 0; i < nodes.size() - 1; i++) {
             CameraPathRenderer.NodeData start = nodes.get(i);
             CameraPathRenderer.NodeData end = nodes.get(i + 1);
 
-            double dist = start.pos.distanceTo(end.pos);
-            long duration = Math.max(1, (long) (dist / end.speed * 50));
+            int durationTicks = getSegmentDurationTicks(start, end);
 
-            if (currentTime + duration >= timeMs) {
-                double t = (double) (timeMs - currentTime) / duration;
+            if (currentTicks + durationTicks >= targetTicks) {
+                double rawT = Mth.clamp((double) (targetTicks - currentTicks) / durationTicks, 0.0, 1.0);
+                SimpleCameraManager.EasingType easing = end.easing != null ? end.easing : EasingType.LINEAR;
+                float t = (float) easing.ease(rawT);
+
+                if ("curved".equals(end.movement) && nodes.size() > 2) {
+                    Vec3 p0 = nodes.get(Math.max(0, i - 1)).pos;
+                    Vec3 p1 = start.pos;
+                    Vec3 p2 = end.pos;
+                    Vec3 p3 = nodes.get(Math.min(nodes.size() - 1, i + 2)).pos;
+                    return CameraPathRenderer.calculateCatmullRom(p0, p1, p2, p3, t);
+                }
+
                 return start.pos.lerp(end.pos, t);
             }
-            currentTime += duration + start.pause;
+            currentTicks += durationTicks + getPauseTicks(end.pause);
         }
         return nodes.getLast().pos;
+    }
+
+    private static List<DurationMarker> buildDurationMarkers() {
+        List<DurationMarker> markers = new ArrayList<>();
+        List<CameraPathRenderer.NodeData> nodes = CameraPathRenderer.getPathNodes();
+
+        if (nodes.isEmpty()) {
+            return markers;
+        }
+
+        if (originalStartEvents != null && !originalStartEvents.isEmpty()) {
+            markers.add(new DurationMarker(0L, 0, getMarkerColor(originalStartEvents.size()), originalStartEvents.size()));
+        }
+
+        CameraPathRenderer.NodeData firstNode = nodes.getFirst();
+        if (firstNode.events != null && !firstNode.events.isEmpty()) {
+            markers.add(new DurationMarker(0L, 1, getMarkerColor(firstNode.events.size()), firstNode.events.size()));
+        }
+
+        long currentTicks = 0L;
+        for (int i = 1; i < nodes.size(); i++) {
+            CameraPathRenderer.NodeData start = nodes.get(i - 1);
+            CameraPathRenderer.NodeData end = nodes.get(i);
+            currentTicks += getSegmentDurationTicks(start, end);
+
+            if (end.events != null && !end.events.isEmpty()) {
+                markers.add(new DurationMarker(currentTicks * 50L, 1, getMarkerColor(end.events.size()), end.events.size()));
+            }
+
+            currentTicks += getPauseTicks(end.pause);
+        }
+
+        Map<Long, Integer> timedCounts = new HashMap<>();
+        for (CutsceneData.Event event : ensureEventStore()) {
+            if (event.time != null) {
+                timedCounts.merge(Math.max(0L, event.time), 1, Integer::sum);
+            }
+        }
+        for (Map.Entry<Long, Integer> entry : timedCounts.entrySet()) {
+            markers.add(new DurationMarker(entry.getKey(), 2, TIMELINE_MARKER_GREEN, entry.getValue()));
+        }
+
+        if (originalEndEvents != null && !originalEndEvents.isEmpty()) {
+            markers.add(new DurationMarker(getActiveCutsceneLengthMs(), 3, getMarkerColor(originalEndEvents.size()), originalEndEvents.size()));
+        }
+
+        markers.sort((left, right) -> {
+            int byTime = Long.compare(left.timeMs(), right.timeMs());
+            if (byTime != 0) {
+                return byTime;
+            }
+            return Integer.compare(left.order(), right.order());
+        });
+        return markers;
+    }
+
+    private static String buildDurationMarkerSummary(List<DurationMarker> markers) {
+        if (markers.isEmpty()) {
+            return "none";
+        }
+
+        List<String> parts = new ArrayList<>();
+        for (DurationMarker marker : markers) {
+            String part = formatDurationMs(marker.timeMs());
+            if (marker.count() > 1) {
+                part += " x" + marker.count();
+            }
+            parts.add(part);
+        }
+        return String.join(" | ", parts);
+    }
+
+    private static void startPreviewPlayback() {
+        if (MC.level == null || MC.player == null || MC.gui == null) {
+            return;
+        }
+
+        List<CameraPathRenderer.NodeData> nodes = CameraPathRenderer.getPathNodes();
+        if (nodes.size() < 2) {
+            sendError("Preview at least two camera nodes before starting prop-camera playback.");
+            return;
+        }
+
+        if (previewPlaybackActive) {
+            stopPreviewPlayback(false);
+        }
+
+        synchronized (MOVE_LOCK) {
+            MOVE_QUEUE.clear();
+            PENDING_TIMED_EVENTS.clear();
+            activeMoveEvents = null;
+            isMoving = false;
+            pendingDisable = false;
+            pauseEndTick = 0;
+            moveTargetPos = null;
+            previewPlaybackActive = true;
+        }
+
+        NAMED_EVENTS.clear();
+        for (CutsceneData.Event event : ensureEventStore()) {
+            if (event.name != null) {
+                NAMED_EVENTS.put(event.name, event);
+            }
+        }
+
+        CameraPathRenderer.NodeData startNode = nodes.getFirst();
+        camera = new SimpleCameraEntity(PROP_CAMERA_ENTITY_ID);
+        camera.apply(startNode.pos, startNode.yaw, startNode.pitch);
+        currentYaw = startNode.yaw;
+        currentPitch = startNode.pitch;
+        currentRoll = startNode.roll;
+        currentFov = Mth.clamp(startNode.fov, 0.0f, 1.0f);
+        camera.spawn();
+
+        previewPlaybackStartTick = MC.gui.getGuiTicks();
+        cutsceneStartTick = previewPlaybackStartTick;
+        previewPlaybackTotalMs = getActiveCutsceneLengthMs();
+
+        for (String eventName : originalStartEvents != null ? originalStartEvents : List.<String>of()) {
+            announcePreviewEvent(NAMED_EVENTS.get(eventName), "Start", 0L);
+        }
+
+        for (CutsceneData.Event event : ensureEventStore()) {
+            if (event.time != null) {
+                PENDING_TIMED_EVENTS.add(event);
+            }
+        }
+
+        for (int i = 1; i < nodes.size(); i++) {
+            CameraPathRenderer.NodeData node = nodes.get(i);
+            Vec3 p0 = nodes.get(Math.max(0, i - 2)).pos;
+            Vec3 p3 = nodes.get(Math.min(nodes.size() - 1, i + 1)).pos;
+
+            if (node.getDuration() != null) {
+                MOVE_QUEUE.add(QueuedMove.withDuration(
+                        node.pos,
+                        node.yaw,
+                        node.pitch,
+                        node.roll,
+                        node.fov,
+                        Math.max(1L, node.getDuration()),
+                        node.pause,
+                        node.easing != null ? node.easing : EasingType.LINEAR,
+                        node.movement != null ? node.movement : "linear",
+                        p0,
+                        p3,
+                        node.events != null ? new ArrayList<>(node.events) : new ArrayList<>()
+                ));
+            } else {
+                MOVE_QUEUE.add(QueuedMove.withSpeed(
+                        node.pos,
+                        node.yaw,
+                        node.pitch,
+                        node.roll,
+                        node.fov,
+                        node.getSpeed() != null ? node.getSpeed() : 1.0,
+                        node.pause,
+                        node.easing != null ? node.easing : EasingType.LINEAR,
+                        node.movement != null ? node.movement : "linear",
+                        p0,
+                        p3,
+                        node.events != null ? new ArrayList<>(node.events) : new ArrayList<>()
+                ));
+            }
+        }
+
+        if (!MOVE_QUEUE.isEmpty()) {
+            processNextMove();
+        }
+        pendingDisable = true;
+        MC.player.displayClientMessage(Component.literal("§aStarted prop-camera playback."), true);
+    }
+
+    private static void stopPreviewPlayback(boolean completed) {
+        if (!previewPlaybackActive && camera == null) {
+            return;
+        }
+
+        if (completed) {
+            for (String eventName : originalEndEvents != null ? originalEndEvents : List.<String>of()) {
+                announcePreviewEvent(NAMED_EVENTS.get(eventName), "End", previewPlaybackTotalMs);
+            }
+        }
+
+        if (camera != null) {
+            camera.despawn();
+            camera = null;
+        }
+
+        synchronized (MOVE_LOCK) {
+            MOVE_QUEUE.clear();
+            PENDING_TIMED_EVENTS.clear();
+            activeMoveEvents = null;
+            isMoving = false;
+            pendingDisable = false;
+            pauseEndTick = 0;
+            moveTargetPos = null;
+            previewPlaybackActive = false;
+        }
+
+        previewPlaybackStartTick = -1;
+        previewPlaybackTotalMs = 0L;
+
+        if (completed && MC.player != null) {
+            MC.player.displayClientMessage(Component.literal("§aProp-camera playback finished."), true);
+        }
+    }
+
+    private static void announcePreviewEvent(@Nullable CutsceneData.Event event, String triggerType, long playbackMs) {
+        if (event == null || MC.player == null) {
+            return;
+        }
+
+        String name = event.name != null && !event.name.isBlank() ? event.name : "unnamed";
+        EventInfo info = getEventInfo(name);
+        StringBuilder message = new StringBuilder("§b[Preview ")
+                .append(triggerType)
+                .append(" @ ")
+                .append(formatDurationMs(Math.max(0L, playbackMs)))
+                .append("] §f")
+                .append(name)
+                .append(" §7(")
+                .append(info.type())
+                .append(")");
+
+        if (!info.data().isBlank() && !"No additional data".equals(info.data())) {
+            message.append(" §8- §7").append(info.data());
+        }
+
+        MC.player.displayClientMessage(Component.literal(message.toString()), false);
+    }
+
+    private static String formatDurationMs(long totalMs) {
+        long safeMs = Math.max(0L, totalMs);
+        long minutes = safeMs / 60000L;
+        long seconds = (safeMs / 1000L) % 60L;
+        long millis = safeMs % 1000L;
+        return String.format("%02d:%02d.%03d", minutes, seconds, millis);
     }
 
     public static void refreshPreview() {
@@ -588,6 +1211,10 @@ public class SimpleCameraManager {
 
     private static void executeCutscene(CutsceneData data, Vec3 origin) {
         MC.execute(() -> {
+            if (previewPlaybackActive) {
+                stopPreviewPlayback(false);
+            }
+
             // Capture chat visibility IMMEDIATELY before any logic starts
             if (originalChatVisibility == null) {
                 originalChatVisibility = MC.options.chatVisibility().get();
@@ -640,9 +1267,14 @@ public class SimpleCameraManager {
     private static void startActualCutscene(CutsceneData data, Vec3 origin) {
         synchronized (MOVE_LOCK) {
             active = true;
+            previewPlaybackActive = false;
             MOVE_QUEUE.clear();
+            PENDING_TIMED_EVENTS.clear();
+            activeMoveEvents = null;
             isMoving = false;
             pendingDisable = false;
+            pauseEndTick = 0;
+            moveTargetPos = null;
         }
 
         // FIRE REMAINING START EVENTS (Non-fade ones)
@@ -718,7 +1350,7 @@ public class SimpleCameraManager {
                         p.movement != null ? p.movement : "linear",
                         p0,
                         p3,
-                        List.of(String.valueOf(p.event))
+                        parseEventList(p.event)
                     ));
                 } else {
                     // For manual points, use withSpeed
@@ -734,7 +1366,7 @@ public class SimpleCameraManager {
                         p.movement != null ? p.movement : "linear",
                         p0,
                         p3,
-                        List.of(String.valueOf(p.event))
+                        parseEventList(p.event)
                     ));
                 }
                 if (!isMoving) {
@@ -748,13 +1380,51 @@ public class SimpleCameraManager {
 
     public static boolean isActive() { return active; }
 
+    private static void applyRecordingMovementDamping() {
+        if (MC.player == null || MC.screen != null || isActive()) return;
+
+        float forward = 0.0f;
+        float strafe = 0.0f;
+
+        if (MC.options.keyUp.isDown()) forward += 1.0f;
+        if (MC.options.keyDown.isDown()) forward -= 1.0f;
+        if (MC.options.keyRight.isDown()) strafe += 1.0f;
+        if (MC.options.keyLeft.isDown()) strafe -= 1.0f;
+
+        Vec3 velocity = MC.player.getDeltaMovement();
+        if (Math.abs(forward) < 1.0E-4f && Math.abs(strafe) < 1.0E-4f) {
+            MC.player.setDeltaMovement(0.0, velocity.y, 0.0);
+            return;
+        }
+
+        // Normalize movement intent so diagonals do not exceed straight-line speed.
+        double inputLen = Math.sqrt((forward * forward) + (strafe * strafe));
+        forward /= (float) inputLen;
+        strafe /= (float) inputLen;
+
+        boolean sneaking = MC.player.isShiftKeyDown();
+        boolean sprinting = MC.player.isSprinting() && !sneaking;
+        double modeBlocksPerSecond = sneaking ? 1.3 : (sprinting ? 5.612 : 4.317);
+        double attrScale = MC.player.getAttributeValue(Attributes.MOVEMENT_SPEED) / 0.1;
+        double blocksPerTick = (modeBlocksPerSecond / 20.0) * Math.max(0.1, attrScale);
+
+        double yawRad = Math.toRadians(MC.player.getYRot());
+        double sin = Math.sin(yawRad);
+        double cos = Math.cos(yawRad);
+
+        double moveX = (strafe * cos) - (forward * sin);
+        double moveZ = (forward * cos) + (strafe * sin);
+
+        MC.player.setDeltaMovement(moveX * blocksPerTick, velocity.y, moveZ * blocksPerTick);
+    }
+
     private static void setPosition(Vec3 pos) {
-        if (!active || camera == null) return;
+        if (camera == null) return;
         camera.setCameraPosition(pos.x, pos.y, pos.z);
     }
 
     private static void setRotation(float yaw, float pitch) {
-        if (!active || camera == null) return;
+        if (camera == null) return;
         camera.setCameraRotation(yaw, pitch);
     }
     
@@ -795,6 +1465,10 @@ public class SimpleCameraManager {
 
     public static void tick() {
         if (Config.DEVELOPER_MODE.get() && recording) {
+            if (Config.INSTANT_RECORDING_MOVEMENT.get()) {
+                applyRecordingMovementDamping();
+            }
+
             int now = MC.gui != null ? MC.gui.getGuiTicks() : 0;
             if (nextRecordTick == -1) {
                 nextRecordTick = now;
@@ -850,7 +1524,11 @@ public class SimpleCameraManager {
                 int elapsedTicks = currentTick - cutsceneStartTick;
                 PENDING_TIMED_EVENTS.removeIf(e -> {
                     if (e.time != null && (e.time / 50) <= elapsedTicks) {
-                        executeEvent(e);
+                        if (previewPlaybackActive) {
+                            announcePreviewEvent(e, "Timed", e.time);
+                        } else {
+                            executeEvent(e);
+                        }
                         return true;
                     }
                     return false;
@@ -866,6 +1544,10 @@ public class SimpleCameraManager {
                 if (!MOVE_QUEUE.isEmpty()) {
                     processNextMove();
                 } else if (pendingDisable) {
+                    if (previewPlaybackActive) {
+                        stopPreviewPlayback(true);
+                        return;
+                    }
                     // Check if a fade event is still running (Added 10 tick safety buffer)
                     if (fadeStartTick != -1 && currentTick < (fadeStartTick + fadeDurationTicks + 10)) {
                         return;
@@ -886,7 +1568,11 @@ public class SimpleCameraManager {
                 // Fire the events for the node we just arrived at
                 if (activeMoveEvents != null) {
                     for (String name : activeMoveEvents) {
-                        executeEvent(NAMED_EVENTS.get(name));
+                        if (previewPlaybackActive) {
+                            announcePreviewEvent(NAMED_EVENTS.get(name), "Node", getPreviewPlaybackElapsedMs());
+                        } else {
+                            executeEvent(NAMED_EVENTS.get(name));
+                        }
                     }
                     activeMoveEvents = null;
                 }
@@ -909,7 +1595,7 @@ public class SimpleCameraManager {
     }
 
     public static void renderTick(float partialTick) {
-        if (!active || camera == null) return;
+        if ((!active && !previewPlaybackActive) || camera == null) return;
 
         synchronized (MOVE_LOCK) {
             if (!isMoving) {
@@ -1077,13 +1763,19 @@ public class SimpleCameraManager {
             camera.despawn();
             camera = null;
             active = false;
+            previewPlaybackActive = false;
             fadeStartTick = -1;
             ACTIVE_TEXTURES.clear();
+            previewPlaybackStartTick = -1;
+            previewPlaybackTotalMs = 0L;
 
             synchronized (MOVE_LOCK) {
                 MOVE_QUEUE.clear();
+                PENDING_TIMED_EVENTS.clear();
+                activeMoveEvents = null;
                 isMoving = false;
                 pendingDisable = false;
+                pauseEndTick = 0;
                 moveTargetPos = null;
             }
 
@@ -1246,6 +1938,161 @@ public class SimpleCameraManager {
             RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
             graphics.pose().popPose();
         }
+    }
+
+    public static void renderEditorOverlay(GuiGraphics graphics) {
+        if (!Config.DEVELOPER_MODE.get() || !CameraPathRenderer.isVisible() || MC.player == null || MC.screen != null) return;
+
+        int x = Math.max(6, graphics.guiWidth() / 100);
+        int y = Math.max(6, graphics.guiHeight() / 80);
+        int lineHeight = MC.font.lineHeight + 2;
+        int availableWidth = Math.max(140, graphics.guiWidth() - (x * 2) - 8);
+        int textWidth = Math.min(availableWidth, Math.max(220, graphics.guiWidth() / 3));
+
+        CameraPathRenderer.NodeData dragged = CameraPathRenderer.getDraggedNode();
+        CameraPathRenderer.NodeData hovered = CameraPathRenderer.getHoveredNode();
+        CameraPathRenderer.NodeData selected = dragged != null ? dragged : hovered;
+        CameraPathRenderer.EventNode hoveredEvent = CameraPathRenderer.getHoveredEvent();
+
+        ResourceLocation activeId = CameraPathRenderer.getActivePathId();
+        String activePath = activeId != null ? activeId.toString() : "none";
+        int nodeCount = CameraPathRenderer.getPathNodes().size();
+        int pathCount = CameraPathRenderer.getAllPaths().size();
+
+        String selectedLine = "Selected Node: none";
+        if (selected != null) {
+            String mode = dragged != null ? "moving" : "hover";
+            selectedLine = String.format("Selected Node: #%d (%s) Pos %.2f, %.2f, %.2f Rot %.1f/%.1f Roll %.1f FOV %.2f",
+                    selected.index, mode, selected.pos.x, selected.pos.y, selected.pos.z,
+                    selected.yaw, selected.pitch, selected.roll, selected.fov);
+        }
+
+        String dragLine = CameraPathRenderer.isDragging()
+                ? String.format("Drag Distance: %.2f", CameraPathRenderer.getDragDistance())
+                : "Drag Distance: -";
+
+        String eventLine = "Hovered Event: none";
+        if (hoveredEvent != null) {
+            String extra = hoveredEvent.extraInfo() != null ? hoveredEvent.extraInfo() : "";
+            if (extra.length() > 140) {
+                extra = extra.substring(0, 140) + "...";
+            }
+            eventLine = "Hovered Event: " + hoveredEvent.name() + " [" + hoveredEvent.type() + "]"
+                    + (extra.isEmpty() ? "" : " Data: " + extra);
+        }
+
+        String recordingTool = Config.RECORDING_TOOL_ITEM.get();
+        long totalDurationMs = getActiveCutsceneLengthMs();
+        long previewElapsedMs = getPreviewPlaybackElapsedMs();
+        List<DurationMarker> durationMarkers = buildDurationMarkers();
+        List<OverlayEntry> statusOverlay = new ArrayList<>();
+        statusOverlay.add(new OverlayEntry(Component.literal("Sandbox Cutscenes Editor"), 0x66FFAA));
+        statusOverlay.add(new OverlayEntry(Component.literal("Path: " + activePath + " | Paths: " + pathCount + " | Nodes: " + nodeCount), 0xFFFFFF));
+        statusOverlay.add(new OverlayEntry(Component.literal("Recording: " + (recording ? "ON" : "OFF") + " (" + Config.RECORDING_INTERVAL_TICKS.get() + "t, " + (Config.INSTANT_RECORDING_MOVEMENT.get() ? "instant" : "vanilla") + ")"), recording ? 0x55FF55 : 0xFFAA55));
+        statusOverlay.add(new OverlayEntry(Component.literal("Prop Camera: " + (previewPlaybackActive ? "RUNNING " + formatDurationMs(previewElapsedMs) + " / " + formatDurationMs(totalDurationMs) : "READY " + formatDurationMs(totalDurationMs))), previewPlaybackActive ? 0x55CCFF : 0xAAAAAA));
+        if (previewPlaybackActive && camera != null) {
+            Vec3 propPos = camera.position();
+            statusOverlay.add(new OverlayEntry(Component.literal(String.format("Prop Pos: %.2f, %.2f, %.2f", propPos.x, propPos.y, propPos.z)), 0x99E6FF));
+            statusOverlay.add(new OverlayEntry(Component.literal(String.format("Prop Rot: %.1f / %.1f / %.1f | FOV %.2f", currentYaw, currentPitch, currentRoll, currentFov)), 0x99E6FF));
+        }
+        statusOverlay.add(new OverlayEntry(Component.literal("Dirty: " + (CameraPathRenderer.isDirty() ? "YES" : "NO")), CameraPathRenderer.isDirty() ? 0xFF5555 : 0xAAAAAA));
+        statusOverlay.add(new OverlayEntry(Component.literal("Event Marks: " + buildDurationMarkerSummary(durationMarkers)), 0xB8FFB8));
+        statusOverlay.add(new OverlayEntry(Component.literal(selectedLine), 0xDDDDDD));
+        statusOverlay.add(new OverlayEntry(Component.literal(dragLine), 0x99CCFF));
+        statusOverlay.add(new OverlayEntry(Component.literal(eventLine), 0xAADDFF));
+
+        List<OverlayEntry> controlsOverlay = new ArrayList<>();
+        controlsOverlay.add(new OverlayEntry(Component.literal("Controls"), 0xFFD966));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(MC.options.keyShift.getTranslatedKeyMessage()).append(Component.literal(" + Left Click: start/stop moving hovered node")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.literal("Left Click on hovered node: consume click / block world hit"), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.literal("Mouse Wheel while moving node: change drag distance"), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.literal("Right Click on node: open node editor"), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.literal("Right Click on event icon: open event editor"), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.literal("Right Click on timed marker: open timed event editor"), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(Component.literal("Right Click with ")).append(Component.literal(recordingTool)).append(Component.literal(": toggle recording")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.ADD_NODE.getTranslatedKeyMessage()).append(Component.literal(": add node at player")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.TOGGLE_PROP_CAMERA.getTranslatedKeyMessage()).append(Component.literal(": start/stop prop-camera playback")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.SAVE_PATH.getTranslatedKeyMessage()).append(Component.literal(": save active path")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.CLEAR_RENDER.getTranslatedKeyMessage()).append(Component.literal(": clear previews (double press if dirty)")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.RERUN_CUTSCENE.getTranslatedKeyMessage()).append(Component.literal(": rerun last cutscene")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.OPEN_TIMED_EVENTS.getTranslatedKeyMessage()).append(Component.literal(": open timed events editor")), 0xBBBBBB));
+
+        int statusBottom = drawOverlayBox(graphics, statusOverlay, x, y, textWidth, lineHeight);
+        drawDurationBar(graphics, x, statusBottom + 4, textWidth, getPreviewPlaybackProgress(), formatDurationMs(previewPlaybackActive ? previewElapsedMs : 0L) + " / " + formatDurationMs(totalDurationMs), previewPlaybackActive, durationMarkers);
+        statusBottom += 18;
+        int controlsHeight = measureOverlayHeight(controlsOverlay, textWidth, lineHeight);
+        int bottomY = graphics.guiHeight() - controlsHeight - 6;
+        int controlsY = Math.max(statusBottom + 6, bottomY);
+        int controlsBoxWidth = textWidth + 8;
+        int controlsX = Math.max(x, graphics.guiWidth() - controlsBoxWidth - x);
+        drawOverlayBox(graphics, controlsOverlay, controlsX, controlsY, textWidth, lineHeight);
+    }
+
+    private static void drawDurationBar(GuiGraphics graphics, int x, int y, int width, float progress, String label, boolean activeBar, List<DurationMarker> markers) {
+        int left = x;
+        int top = y;
+        int right = x + width;
+        int bottom = y + 10;
+        int fillRight = left + Math.round(width * Mth.clamp(progress, 0.0f, 1.0f));
+        int fillColor = activeBar ? 0xCC55CCFF : 0x88444444;
+
+        graphics.fill(left - 1, top - 1, right + 1, bottom + 1, 0xB0000000);
+        graphics.fill(left, top, right, bottom, 0xFF1A1A1A);
+        if (fillRight > left) {
+            graphics.fill(left, top, fillRight, bottom, fillColor);
+        }
+
+        long totalDurationMs = Math.max(1L, getActiveCutsceneLengthMs());
+        for (int index = 0; index < markers.size(); ) {
+            DurationMarker marker = markers.get(index);
+            int clusterEnd = index + 1;
+            while (clusterEnd < markers.size() && markers.get(clusterEnd).timeMs() == marker.timeMs()) {
+                clusterEnd++;
+            }
+
+            int clusterSize = clusterEnd - index;
+            for (int clusterIndex = 0; clusterIndex < clusterSize; clusterIndex++) {
+                DurationMarker clusterMarker = markers.get(index + clusterIndex);
+                float markerProgress = Mth.clamp((float) clusterMarker.timeMs() / (float) totalDurationMs, 0.0f, 1.0f);
+                int baseX = left + Math.round(width * markerProgress);
+                int offset = (clusterIndex * 3) - ((clusterSize - 1) * 3 / 2);
+                int markerX = Mth.clamp(baseX + offset, left, right);
+                int markerTop = top - 2;
+                int markerBottom = bottom + 2;
+
+                graphics.fill(markerX, markerTop, markerX + 1, markerBottom, clusterMarker.color());
+                if (clusterMarker.count() > 1) {
+                    graphics.fill(markerX - 1, markerTop + 2, markerX + 2, markerBottom - 2, clusterMarker.color());
+                }
+            }
+
+            index = clusterEnd;
+        }
+
+        graphics.drawString(MC.font, Component.literal("Duration: " + label), left, bottom + 3, 0xE0E0E0, false);
+    }
+
+    private static int measureOverlayHeight(List<OverlayEntry> entries, int textWidth, int lineHeight) {
+        int wrappedLines = 0;
+        for (OverlayEntry entry : entries) {
+            wrappedLines += Math.max(1, MC.font.split(entry.text(), textWidth).size());
+        }
+        return (wrappedLines * lineHeight) + 8;
+    }
+
+    private static int drawOverlayBox(GuiGraphics graphics, List<OverlayEntry> entries, int x, int y, int textWidth, int lineHeight) {
+        int boxHeight = measureOverlayHeight(entries, textWidth, lineHeight);
+        int boxWidth = textWidth + 8;
+        graphics.fill(x - 4, y - 4, x + boxWidth, y + boxHeight, 0x90000000);
+
+        int lineY = y;
+        for (OverlayEntry entry : entries) {
+            for (FormattedCharSequence splitLine : MC.font.split(entry.text(), textWidth)) {
+                graphics.drawString(MC.font, splitLine, x, lineY, entry.color(), false);
+                lineY += lineHeight;
+            }
+        }
+        return y + boxHeight;
     }
 
     private static float getAlpha(ActiveTexture t, int currentTick, float partial) {

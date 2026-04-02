@@ -2,6 +2,7 @@ package com.remag.scs.client.render;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
+import com.remag.scs.Config;
 import com.remag.scs.client.camera.SimpleCameraManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
@@ -23,6 +24,10 @@ public class CameraPathRenderer {
     private static boolean dirty = false; // New dirty flag
     private static NodeData hoveredNode = null;
     private static NodeData draggedNode = null;
+    private static final double DEFAULT_DRAG_DISTANCE = 5.0;
+    private static final double MIN_DRAG_DISTANCE = 1.0;
+    private static final double MAX_DRAG_DISTANCE = 20.0;
+    private static double dragDistance = DEFAULT_DRAG_DISTANCE;
 
     public static boolean isVisible() {
         return visible;
@@ -48,6 +53,23 @@ public class CameraPathRenderer {
 
     public static NodeData getHoveredNode() {
         return hoveredNode;
+    }
+
+    public static NodeData getDraggedNode() {
+        return draggedNode;
+    }
+
+    public static boolean isDragging() {
+        return draggedNode != null;
+    }
+
+    public static double getDragDistance() {
+        return dragDistance;
+    }
+
+    public static double adjustDragDistance(double delta) {
+        dragDistance = Math.max(MIN_DRAG_DISTANCE, Math.min(MAX_DRAG_DISTANCE, dragDistance + delta));
+        return dragDistance;
     }
 
     public static EventNode getHoveredEvent() {
@@ -123,14 +145,29 @@ public class CameraPathRenderer {
         public void setLookAt(Vec3 lookAt) { this.lookAt = lookAt; }
     }
 
-    public static void startDragging() {
+    public static boolean toggleDragging() {
+        if (draggedNode != null) {
+            draggedNode = null;
+            dragDistance = DEFAULT_DRAG_DISTANCE;
+            return false;
+        }
         if (hoveredNode != null) {
             draggedNode = hoveredNode;
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player != null) {
+                dragDistance = Math.max(MIN_DRAG_DISTANCE,
+                        Math.min(MAX_DRAG_DISTANCE, mc.player.position().distanceTo(hoveredNode.pos)));
+            } else {
+                dragDistance = DEFAULT_DRAG_DISTANCE;
+            }
+            return true;
         }
+        return false;
     }
 
     public static void stopDragging() {
         draggedNode = null;
+        dragDistance = DEFAULT_DRAG_DISTANCE;
     }
 
     public static void setPath(ResourceLocation id, List<NodeData> nodes) {
@@ -141,7 +178,46 @@ public class CameraPathRenderer {
             PATHS.put(id, new ArrayList<>(nodes));
             activePathId = id;
         }
+        if (draggedNode != null && PATHS.values().stream().noneMatch(path -> path.contains(draggedNode))) {
+            draggedNode = null;
+        }
         visible = !PATHS.isEmpty();
+    }
+
+    public static boolean removeNode(NodeData target) {
+        if (target == null) {
+            return false;
+        }
+
+        for (Map.Entry<ResourceLocation, List<NodeData>> entry : PATHS.entrySet()) {
+            List<NodeData> path = entry.getValue();
+            if (!path.contains(target)) {
+                continue;
+            }
+
+            List<NodeData> remaining = new ArrayList<>(path);
+            remaining.remove(target);
+
+            hoveredNode = hoveredNode == target ? null : hoveredNode;
+            draggedNode = draggedNode == target ? null : draggedNode;
+            if (hoveredEvent != null && hoveredEvent.sourceNode() == target) {
+                hoveredEvent = null;
+            }
+
+            if (remaining.isEmpty()) {
+                setPath(entry.getKey(), null);
+                return true;
+            }
+
+            List<NodeData> rebuilt = new ArrayList<>();
+            for (int i = 0; i < remaining.size(); i++) {
+                rebuilt.add(copyNode(remaining.get(i), i));
+            }
+            setPath(entry.getKey(), rebuilt);
+            return true;
+        }
+
+        return false;
     }
 
     public static void clear() {
@@ -154,16 +230,41 @@ public class CameraPathRenderer {
         activePathId = null;
         visible = false;
         hoveredNode = null;
+        draggedNode = null;
         dirty = false;
     }
 
     public static boolean isDirty() { return dirty; }
     public static void setDirty(boolean value) { dirty = value; }
 
-    public record EventNode(Vec3 pos, String name, String type, String extraInfo) {}
+    private static NodeData copyNode(NodeData source, int index) {
+        NodeData copy;
+        if (source.getDuration() != null) {
+            copy = new NodeData(source.pos, source.yaw, source.pitch, source.roll, source.fov, index, source.easing, source.movement);
+            copy.setDuration(source.getDuration());
+            copy.setSpeed(source.getSpeed());
+        } else {
+            copy = new NodeData(source.pos, source.yaw, source.pitch, source.roll, source.fov, source.getSpeed(), index, source.pause, source.easing, source.movement);
+        }
+
+        copy.pause = source.pause;
+        copy.events = source.events != null ? new ArrayList<>(source.events) : new ArrayList<>();
+        copy.currentScale = source.currentScale;
+        copy.lookAt = source.lookAt;
+        return copy;
+    }
+
+    public record EventNode(Vec3 pos, String name, String type, String extraInfo, NodeData sourceNode, String selectedEventName) {}
 
     public static void addTimedEventVisual(Vec3 pos, String name, String type, String extra) {
-        TIMED_EVENTS.add(new EventNode(pos, name, type, extra));
+        TIMED_EVENTS.add(new EventNode(pos, name, type, extra, null, null));
+    }
+
+    public static void clearTimedEventVisuals() {
+        TIMED_EVENTS.clear();
+        if (hoveredEvent != null && hoveredEvent.sourceNode() == null) {
+            hoveredEvent = null;
+        }
     }
 
     private static EventNode hoveredEvent = null;
@@ -171,9 +272,7 @@ public class CameraPathRenderer {
     public static void updateHover(Vec3 cameraPos, Vec3 lookVec) {
         if (draggedNode != null) {
             // Move node along the look vector, kept at a fixed distance or against blocks
-            Minecraft mc = Minecraft.getInstance();
-            double dist = 5.0; // Distance from player
-            draggedNode.setPos(cameraPos.add(lookVec.scale(dist)));
+            draggedNode.setPos(cameraPos.add(lookVec.scale(dragDistance)));
             dirty = true; // Mark dirty when dragging
             return;
         }
@@ -208,10 +307,10 @@ public class CameraPathRenderer {
                         if (cp.distanceTo(eventVisualPos) < 0.2 && proj < 10) {
                             if (node.events.size() > 1) {
                                 String names = String.join(", ", node.events);
-                                hoveredEvent = new EventNode(eventVisualPos, names, "Multiple", "");
+                                hoveredEvent = new EventNode(eventVisualPos, names, "Multiple", "", node, node.events.getFirst());
                             } else {
                                 SimpleCameraManager.EventInfo info = SimpleCameraManager.getEventInfo(node.events.get(0));
-                                hoveredEvent = new EventNode(eventVisualPos, node.events.get(0), info.type(), info.data());
+                                hoveredEvent = new EventNode(eventVisualPos, node.events.get(0), info.type(), info.data(), node, node.events.get(0));
                             }
                             return;
                         }
@@ -327,11 +426,23 @@ public class CameraPathRenderer {
             float size = (event == hoveredEvent) ? 0.15f : 0.08f;
             drawBox(matrix, event.pos, size, 0, 255, 100, 200); // Bright Green
 
-            // Faint vertical line to path
+            // Draw a thicker connector bundle so timed markers remain visible against bright terrain.
+            float x = (float) event.pos.x;
+            float y = (float) event.pos.y;
+            float z = (float) event.pos.z;
+            float bottomY = y - 0.5f;
+            float offset = 0.015f;
+
             Tesselator lineTess = Tesselator.getInstance();
             BufferBuilder line = lineTess.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
-            line.addVertex(matrix, (float)event.pos.x, (float)event.pos.y, (float)event.pos.z).setColor(0, 255, 100, 50);
-            line.addVertex(matrix, (float)event.pos.x, (float)event.pos.y - 0.5f, (float)event.pos.z).setColor(0, 255, 100, 50);
+            line.addVertex(matrix, x, y, z).setColor(0, 255, 100, 190);
+            line.addVertex(matrix, x, bottomY, z).setColor(0, 255, 100, 190);
+
+            line.addVertex(matrix, x + offset, y, z).setColor(0, 200, 70, 150);
+            line.addVertex(matrix, x + offset, bottomY, z).setColor(0, 200, 70, 150);
+
+            line.addVertex(matrix, x - offset, y, z).setColor(0, 200, 70, 150);
+            line.addVertex(matrix, x - offset, bottomY, z).setColor(0, 200, 70, 150);
             BufferUploader.drawWithShader(line.buildOrThrow());
         }
 
@@ -391,6 +502,21 @@ public class CameraPathRenderer {
             }
         }
 
+        if (SimpleCameraManager.isPreviewPlaybackActive() && SimpleCameraManager.getCamera() != null) {
+            Vec3 pathPos = SimpleCameraManager.getCamera().position();
+            Vec3 eyePos = SimpleCameraManager.getCamera().getEyePosition(frameTime);
+            Vec3 forward = Vec3.directionFromRotation(SimpleCameraManager.getPitch(), SimpleCameraManager.getYaw()).normalize();
+
+            // Draw the solid prop camera with depth writes so body/lens self-occlude correctly.
+            RenderSystem.depthMask(true);
+            RenderSystem.disableBlend();
+            drawPreviewCameraProp(matrix, eyePos, SimpleCameraManager.getYaw(), SimpleCameraManager.getPitch(), SimpleCameraManager.getRoll());
+            drawPropDropLine(matrix, eyePos, pathPos);
+            if (Config.SHOW_PROP_CAMERA_FRUSTUM.get()) {
+                drawPreviewFrustum(matrix, eyePos, forward, SimpleCameraManager.getFov());
+            }
+        }
+
         RenderSystem.depthMask(true);
         RenderSystem.disableBlend();
         RenderSystem.enableCull();
@@ -422,6 +548,153 @@ public class CameraPathRenderer {
                 .add(p0.scale(2.0).subtract(p1.scale(5.0)).add(p2.scale(4.0)).subtract(p3).scale(t2))
                 .add(p1.scale(3.0).subtract(p0).subtract(p2.scale(3.0)).add(p3).scale(t3))
                 .scale(0.5);
+    }
+
+    private static void drawPreviewCameraProp(Matrix4f matrix, Vec3 center, float yaw, float pitch, float roll) {
+        Vec3 forward = Vec3.directionFromRotation(pitch, yaw).normalize();
+        Vec3 referenceUp = Math.abs(forward.y) > 0.999 ? new Vec3(0.0, 0.0, 1.0) : new Vec3(0.0, 1.0, 0.0);
+        Vec3 right = forward.cross(referenceUp).normalize();
+        Vec3 up = right.cross(forward).normalize();
+
+        if (Math.abs(roll) > 0.001f) {
+            right = rotateAroundAxis(right, forward, roll).normalize();
+            up = rotateAroundAxis(up, forward, roll).normalize();
+        }
+
+        Vec3 bodyCenter = center.subtract(forward.scale(0.03));
+        Vec3 bodyRight = right.scale(0.14);
+        Vec3 bodyUp = up.scale(0.11);
+        Vec3 bodyForward = forward.scale(0.12);
+        Vec3 coneBaseCenter = bodyCenter.add(bodyForward).add(forward.scale(0.15));
+        Vec3 coneRight = right.scale(0.07);
+        Vec3 coneUp = up.scale(0.06);
+        Vec3 coneForward = forward.scale(0.16);
+
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_COLOR);
+
+        addOrientedBox(buffer, matrix, bodyCenter, bodyRight, bodyUp, bodyForward, 58, 58, 62, 255);
+        addOrientedPyramid(buffer, matrix, coneBaseCenter, coneRight, coneUp, coneForward, 36, 36, 40, 255);
+
+        BufferUploader.drawWithShader(buffer.buildOrThrow());
+    }
+
+    private static Vec3 rotateAroundAxis(Vec3 vector, Vec3 axis, float degrees) {
+        double radians = Math.toRadians(degrees);
+        double cos = Math.cos(radians);
+        double sin = Math.sin(radians);
+        Vec3 normalizedAxis = axis.normalize();
+
+        Vec3 term1 = vector.scale(cos);
+        Vec3 term2 = normalizedAxis.cross(vector).scale(sin);
+        Vec3 term3 = normalizedAxis.scale(normalizedAxis.dot(vector) * (1.0 - cos));
+        return term1.add(term2).add(term3);
+    }
+
+    private static void addOrientedBox(BufferBuilder buffer, Matrix4f matrix, Vec3 center, Vec3 right, Vec3 up, Vec3 forward, int r, int g, int b, int a) {
+        Vec3 nnn = center.subtract(right).subtract(up).subtract(forward);
+        Vec3 nnp = center.subtract(right).subtract(up).add(forward);
+        Vec3 npn = center.subtract(right).add(up).subtract(forward);
+        Vec3 npp = center.subtract(right).add(up).add(forward);
+        Vec3 pnn = center.add(right).subtract(up).subtract(forward);
+        Vec3 pnp = center.add(right).subtract(up).add(forward);
+        Vec3 ppn = center.add(right).add(up).subtract(forward);
+        Vec3 ppp = center.add(right).add(up).add(forward);
+
+        addQuad(buffer, matrix, nnn, pnn, ppn, npn, r, g, b, a);
+        addQuad(buffer, matrix, pnp, nnp, npp, ppp, r, g, b, a);
+        addQuad(buffer, matrix, nnp, nnn, npn, npp, r, g, b, a);
+        addQuad(buffer, matrix, pnn, pnp, ppp, ppn, r, g, b, a);
+        addQuad(buffer, matrix, npn, ppn, ppp, npp, r, g, b, a);
+        addQuad(buffer, matrix, nnn, nnp, pnp, pnn, r, g, b, a);
+    }
+
+    private static void addOrientedPyramid(BufferBuilder buffer, Matrix4f matrix, Vec3 baseCenter, Vec3 right, Vec3 up, Vec3 forward, int r, int g, int b, int a) {
+        Vec3 b1 = baseCenter.subtract(right).subtract(up);
+        Vec3 b2 = baseCenter.add(right).subtract(up);
+        Vec3 b3 = baseCenter.add(right).add(up);
+        Vec3 b4 = baseCenter.subtract(right).add(up);
+        // Lens cone points outward from the camera body.
+        Vec3 apex = baseCenter.subtract(forward);
+
+        addQuad(buffer, matrix, b1, b2, b3, b4, r, g, b, a);
+        addTriangle(buffer, matrix, b1, b2, apex, r, g, b, a);
+        addTriangle(buffer, matrix, b2, b3, apex, r, g, b, a);
+        addTriangle(buffer, matrix, b3, b4, apex, r, g, b, a);
+        addTriangle(buffer, matrix, b4, b1, apex, r, g, b, a);
+    }
+
+    private static void addQuad(BufferBuilder buffer, Matrix4f matrix, Vec3 aPos, Vec3 bPos, Vec3 cPos, Vec3 dPos, int r, int g, int b, int a) {
+        addTriangle(buffer, matrix, aPos, bPos, cPos, r, g, b, a);
+        addTriangle(buffer, matrix, aPos, cPos, dPos, r, g, b, a);
+    }
+
+    private static void addTriangle(BufferBuilder buffer, Matrix4f matrix, Vec3 aPos, Vec3 bPos, Vec3 cPos, int r, int g, int b, int a) {
+        buffer.addVertex(matrix, (float) aPos.x, (float) aPos.y, (float) aPos.z).setColor(r, g, b, a);
+        buffer.addVertex(matrix, (float) bPos.x, (float) bPos.y, (float) bPos.z).setColor(r, g, b, a);
+        buffer.addVertex(matrix, (float) cPos.x, (float) cPos.y, (float) cPos.z).setColor(r, g, b, a);
+    }
+
+    private static void drawPropDropLine(Matrix4f matrix, Vec3 from, Vec3 to) {
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder line = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+        line.addVertex(matrix, (float) from.x, (float) from.y, (float) from.z).setColor(180, 180, 180, 255);
+        line.addVertex(matrix, (float) to.x, (float) to.y, (float) to.z).setColor(90, 90, 90, 255);
+        BufferUploader.drawWithShader(line.buildOrThrow());
+    }
+
+    private static void drawPreviewFrustum(Matrix4f matrix, Vec3 origin, Vec3 forward, float zoomScale) {
+        double maxRange = 8.0;
+        double baseFovDeg = 70.0;
+        double approxFovDeg = 5.0 + (baseFovDeg - 5.0) * Math.max(0.0, Math.min(1.0, zoomScale));
+        double halfWidth = Math.tan(Math.toRadians(approxFovDeg * 0.5)) * maxRange;
+        double halfHeight = halfWidth * 0.56; // Rough 16:9 framing
+
+        Vec3 refUp = Math.abs(forward.y) > 0.999 ? new Vec3(0.0, 0.0, 1.0) : new Vec3(0.0, 1.0, 0.0);
+        Vec3 right = forward.cross(refUp).normalize();
+        Vec3 up = right.cross(forward).normalize();
+        Vec3 farCenter = origin.add(forward.scale(maxRange));
+
+        Vec3 topLeft = farCenter.add(up.scale(halfHeight)).subtract(right.scale(halfWidth));
+        Vec3 topRight = farCenter.add(up.scale(halfHeight)).add(right.scale(halfWidth));
+        Vec3 bottomLeft = farCenter.subtract(up.scale(halfHeight)).subtract(right.scale(halfWidth));
+        Vec3 bottomRight = farCenter.subtract(up.scale(halfHeight)).add(right.scale(halfWidth));
+
+        // Very transparent filled bounds to make frustum volume easier to read.
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.depthMask(false);
+
+        Tesselator faceTess = Tesselator.getInstance();
+        BufferBuilder faces = faceTess.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_COLOR);
+        int faceA = 28;
+        addTriangle(faces, matrix, origin, topLeft, topRight, 255, 255, 255, faceA);
+        addTriangle(faces, matrix, origin, topRight, bottomRight, 255, 255, 255, faceA);
+        addTriangle(faces, matrix, origin, bottomRight, bottomLeft, 255, 255, 255, faceA);
+        addTriangle(faces, matrix, origin, bottomLeft, topLeft, 255, 255, 255, faceA);
+        addQuad(faces, matrix, topLeft, topRight, bottomRight, bottomLeft, 255, 255, 255, 20);
+        BufferUploader.drawWithShader(faces.buildOrThrow());
+
+        RenderSystem.depthMask(true);
+        RenderSystem.disableBlend();
+
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder lines = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+        addLine(lines, matrix, origin, topLeft, 255, 220, 80, 200);
+        addLine(lines, matrix, origin, topRight, 255, 220, 80, 200);
+        addLine(lines, matrix, origin, bottomLeft, 255, 220, 80, 200);
+        addLine(lines, matrix, origin, bottomRight, 255, 220, 80, 200);
+
+        addLine(lines, matrix, topLeft, topRight, 255, 180, 60, 180);
+        addLine(lines, matrix, topRight, bottomRight, 255, 180, 60, 180);
+        addLine(lines, matrix, bottomRight, bottomLeft, 255, 180, 60, 180);
+        addLine(lines, matrix, bottomLeft, topLeft, 255, 180, 60, 180);
+        BufferUploader.drawWithShader(lines.buildOrThrow());
+    }
+
+    private static void addLine(BufferBuilder buffer, Matrix4f matrix, Vec3 from, Vec3 to, int r, int g, int b, int a) {
+        buffer.addVertex(matrix, (float) from.x, (float) from.y, (float) from.z).setColor(r, g, b, a);
+        buffer.addVertex(matrix, (float) to.x, (float) to.y, (float) to.z).setColor(r, g, b, a);
     }
 
     private static void drawBox(Matrix4f matrix, Vec3 p, float size, int r, int g, int b, int a) {

@@ -1,5 +1,6 @@
 package com.remag.scs.client.render;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
@@ -11,12 +12,28 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.world.phys.Vec3;
+import org.jetbrains.annotations.NotNull;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class NodeEditorScreen extends Screen {
+    private static final int PANEL_WIDTH = 320;
+    private static final int FIELD_WIDTH = 220;
+    private static final int HALF_WIDTH = 106;
+    private static final int ROW_SPACING = 24;
+    private static final int PANEL_PADDING = 12;
+
     private final CameraPathRenderer.NodeData node;
     private EditBox xEdit, yEdit, zEdit, yawEdit, pitchEdit, rollEdit, fovEdit, speedEdit, pauseEdit, lookAtEdit;
+    private final List<LabelLine> labels = new ArrayList<>();
+
+    private int panelLeft;
+    private int panelTop;
+    private int panelRight;
+    private int panelBottom;
+
+    private record LabelLine(String text, int x, int y) {}
 
     public NodeEditorScreen(CameraPathRenderer.NodeData node) {
         super(Component.literal("Edit Node " + node.index));
@@ -25,64 +42,83 @@ public class NodeEditorScreen extends Screen {
 
     @Override
     protected void init() {
+        labels.clear();
+
         int centerX = width / 2;
-        int centerY = height / 2;
-        int fieldWidth = 100;
-        int fieldHeight = 20;
-        int spacing = 22; // Reduced spacing
 
-        // Start from a centered Y and offset upwards to start the list
-        int startY = centerY - 100;
+        int estimatedPanelHeight = estimatePanelHeight();
+        panelTop = Math.max(8, (height - estimatedPanelHeight) / 2);
+        panelLeft = centerX - PANEL_WIDTH / 2;
+        panelRight = panelLeft + PANEL_WIDTH;
 
-        xEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY, fieldWidth, fieldHeight, Component.literal("X")));
+        int labelX = panelLeft + PANEL_PADDING;
+        int fieldX = panelRight - PANEL_PADDING - FIELD_WIDTH;
+        int y = panelTop + PANEL_PADDING + font.lineHeight + 12;
+
+        xEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("X")));
         xEdit.setValue(String.format("%.2f", node.pos.x));
-        
-        yEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing, fieldWidth, fieldHeight, Component.literal("Y")));
+        labels.add(new LabelLine("X", labelX, y + 6));
+
+        y += ROW_SPACING;
+        yEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Y")));
         yEdit.setValue(String.format("%.2f", node.pos.y));
+        labels.add(new LabelLine("Y", labelX, y + 6));
 
-        zEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 2, fieldWidth, fieldHeight, Component.literal("Z")));
+        y += ROW_SPACING;
+        zEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Z")));
         zEdit.setValue(String.format("%.2f", node.pos.z));
+        labels.add(new LabelLine("Z", labelX, y + 6));
 
-        yawEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 3, fieldWidth, fieldHeight, Component.literal("Yaw")));
+        y += ROW_SPACING;
+        yawEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Yaw")));
         yawEdit.setValue(String.format("%.1f", node.yaw));
+        labels.add(new LabelLine("Yaw", labelX, y + 6));
 
-        pitchEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 4, fieldWidth, fieldHeight, Component.literal("Pitch")));
+        y += ROW_SPACING;
+        pitchEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Pitch")));
         pitchEdit.setValue(String.format("%.1f", node.pitch));
+        labels.add(new LabelLine("Pitch", labelX, y + 6));
 
-        rollEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 5, fieldWidth, fieldHeight, Component.literal("Roll")));
+        y += ROW_SPACING;
+        rollEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Roll")));
         rollEdit.setValue(String.format("%.1f", node.roll));
+        labels.add(new LabelLine("Roll", labelX, y + 6));
 
-        fovEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 6, fieldWidth, fieldHeight, Component.literal("FOV")));
+        y += ROW_SPACING;
+        fovEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("FOV")));
         fovEdit.setValue(String.format("%.2f", node.fov));
+        labels.add(new LabelLine("FOV", labelX, y + 6));
 
-        // Copy Yaw Button
+        y += ROW_SPACING;
         addRenderableWidget(Button.builder(Component.literal("Copy Yaw"), b -> {
-            if (minecraft.player != null) {
+            if (minecraft != null && minecraft.player != null) {
                 yawEdit.setValue(String.format("%.1f", minecraft.player.getYRot()));
             }
-        }).bounds(centerX + 60, startY + spacing * 3, 80, 20).build());
+        }).bounds(fieldX, y, HALF_WIDTH, 20).build());
 
-        // Copy Pitch Button
         addRenderableWidget(Button.builder(Component.literal("Copy Pitch"), b -> {
-            if (minecraft.player != null) {
+            if (minecraft != null && minecraft.player != null) {
                 pitchEdit.setValue(String.format("%.1f", minecraft.player.getXRot()));
             }
-        }).bounds(centerX + 60, startY + spacing * 4, 80, 20).build());
+        }).bounds(fieldX + HALF_WIDTH + 8, y, HALF_WIDTH, 20).build());
 
-        speedEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 7, fieldWidth, fieldHeight, Component.literal("Speed")));
+        y += ROW_SPACING;
+        speedEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Speed")));
         speedEdit.setValue(node.speed != null ? String.format("%.2f", node.speed) : "0.00");
+        labels.add(new LabelLine("Speed", labelX, y + 6));
 
-        pauseEdit = addRenderableWidget(new EditBox(font, centerX - 50, startY + spacing * 8, fieldWidth, fieldHeight, Component.literal("Pause")));
+        y += ROW_SPACING;
+        pauseEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Pause")));
         pauseEdit.setValue(String.valueOf(node.pause));
+        labels.add(new LabelLine("Pause", labelX, y + 6));
 
-        // Look At Target Field
-        // Look At Target Field
-        lookAtEdit = addRenderableWidget(new EditBox(font, centerX + 60, startY + spacing * 8, 110, 20, Component.literal("Look At X Y Z")));
-        lookAtEdit.setSuggestion("Target X Y Z");
-        
-        // Fetch start node to calculate relative display string
+        y += ROW_SPACING;
+        lookAtEdit = addRenderableWidget(new EditBox(font, fieldX, y, FIELD_WIDTH, 20, Component.literal("Look At X Y Z")));
+        configureLookAtPlaceholder();
+        labels.add(new LabelLine("Look At", labelX, y + 6));
+
         List<CameraPathRenderer.NodeData> currentPath = CameraPathRenderer.getPathNodes();
-        Vec3 pathOrigin = currentPath.isEmpty() ? Vec3.ZERO : currentPath.get(0).pos;
+        Vec3 pathOrigin = currentPath.isEmpty() ? Vec3.ZERO : currentPath.getFirst().pos;
 
         if (node.lookAt != null) {
             lookAtEdit.setValue(String.format("%.1f %.1f %.1f", 
@@ -91,7 +127,7 @@ public class NodeEditorScreen extends Screen {
                 node.lookAt.z - pathOrigin.z));
         }
 
-        // Set Look At Button
+        y += ROW_SPACING;
         addRenderableWidget(Button.builder(Component.literal("Set Look At"), b -> {
             String[] parts = lookAtEdit.getValue().split(" ");
             if (parts.length == 3) {
@@ -99,8 +135,7 @@ public class NodeEditorScreen extends Screen {
                     double rx = Double.parseDouble(parts[0]);
                     double ry = Double.parseDouble(parts[1]);
                     double rz = Double.parseDouble(parts[2]);
-                    
-                    // Convert relative input to world pos for rendering/internal use
+
                     Vec3 worldLookAt = new Vec3(rx + pathOrigin.x, ry + pathOrigin.y, rz + pathOrigin.z);
                     node.setLookAt(worldLookAt);
                     CameraPathRenderer.setDirty(true);
@@ -117,26 +152,24 @@ public class NodeEditorScreen extends Screen {
                     pitchEdit.setValue(String.format("%.1f", pitch));
                 } catch (Exception ignored) {}
             }
-        }).bounds(centerX + 60, startY + spacing * 8, 110, 20).build());
+        }).bounds(fieldX, y, FIELD_WIDTH, 20).build());
 
-        // Fixed Easing Cycle Button - placed next to the pause field or below
-        addRenderableWidget(CycleButton.builder((SimpleCameraManager.EasingType value) -> 
+        y += ROW_SPACING;
+        addRenderableWidget(CycleButton.builder((SimpleCameraManager.EasingType value) ->
                 Component.literal(value.name()))
                 .withValues(SimpleCameraManager.EasingType.values())
                 .withInitialValue(node.easing)
-                .create(centerX - 50, startY + spacing * 9, fieldWidth, fieldHeight, Component.literal("Easing"), (button, value) -> {
-                    node.easing = value;
-                }));
+                .create(fieldX, y, FIELD_WIDTH, 20, Component.literal("Easing"), (button, value) -> node.easing = value));
+        labels.add(new LabelLine("Easing", labelX, y + 6));
 
-        // Movement Type Toggle
+        y += ROW_SPACING;
         addRenderableWidget(CycleButton.builder((String value) -> Component.literal(value.toUpperCase()))
                 .withValues("linear", "curved")
                 .withInitialValue(node.movement)
-                .create(centerX + 60, startY + spacing * 7, 110, 20, Component.literal("Mode"), (button, value) -> {
-                    node.movement = value;
-                }));
+                .create(fieldX, y, FIELD_WIDTH, 20, Component.literal("Mode"), (button, value) -> node.movement = value));
+        labels.add(new LabelLine("Mode", labelX, y + 6));
 
-        // Save Button at the bottom
+        y += ROW_SPACING + 4;
         addRenderableWidget(Button.builder(Component.literal("Save"), b -> {
             try {
                 node.pos = new net.minecraft.world.phys.Vec3(
@@ -153,32 +186,61 @@ public class NodeEditorScreen extends Screen {
                 CameraPathRenderer.setDirty(true);
                 this.onClose();
             } catch (Exception ignored) {}
-        }).bounds(centerX - 50, startY + spacing * 10 + 5, 100, 20).build());
+        }).bounds(fieldX, y, HALF_WIDTH, 20).build());
+
+        addRenderableWidget(Button.builder(Component.literal("Edit Events"), b -> {
+            String initialEvent = (node.events != null && !node.events.isEmpty()) ? node.events.getFirst() : null;
+            openScreen(new EventEditorScreen(node, initialEvent));
+        }).bounds(fieldX + HALF_WIDTH + 8, y, HALF_WIDTH, 20).build());
+
+        y += ROW_SPACING;
+        addRenderableWidget(Button.builder(Component.literal("Timed Events"), b -> {
+            List<String> timedNames = SimpleCameraManager.getTimedEventNames();
+            String initialTimed = timedNames.isEmpty() ? null : timedNames.getFirst();
+            openScreen(new EventEditorScreen(node, initialTimed, true));
+        }).bounds(fieldX, y, FIELD_WIDTH, 20).build());
+
+        y += ROW_SPACING;
+        addRenderableWidget(Button.builder(Component.literal("Done"), b -> onClose())
+                .bounds(centerX - 48, y, 96, 20).build());
+
+        panelBottom = y + 20 + PANEL_PADDING;
     }
 
     @Override
-    public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    public void render(@NotNull GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         graphics.fill(0, 0, this.width, this.height, 0x88000000);
-        
         RenderSystem.setShader(GameRenderer::getPositionColorShader);
-        graphics.drawCenteredString(font, this.title, width / 2, height / 2 - 115, 0xFFFFFF);
-        
-        int labelX = width / 2 - 70;
-        int centerY = height / 2;
-        int startY = centerY - 100;
-        int spacing = 22;
+        graphics.fill(panelLeft, panelTop, panelRight, panelBottom, 0x66000000);
+        graphics.drawCenteredString(font, this.title, width / 2, panelTop + PANEL_PADDING, 0xFFFFFF);
 
-        graphics.drawString(font, "X:", labelX, startY + 5, 0xAAAAAA);
-        graphics.drawString(font, "Y:", labelX, startY + spacing + 5, 0xAAAAAA);
-        graphics.drawString(font, "Z:", labelX, startY + spacing * 2 + 5, 0xAAAAAA);
-        graphics.drawString(font, "Yaw:", labelX - 10, startY + spacing * 3 + 5, 0xAAAAAA);
-        graphics.drawString(font, "Pitch:", labelX - 15, startY + spacing * 4 + 5, 0xAAAAAA);
-        graphics.drawString(font, "Roll:", labelX - 15, startY + spacing * 5 + 5, 0xAAAAAA);
-        graphics.drawString(font, "FOV:", labelX - 15, startY + spacing * 6 + 5, 0xAAAAAA);
-        graphics.drawString(font, "Speed:", labelX - 20, startY + spacing * 7 + 5, 0xAAAAAA);
-        graphics.drawString(font, "Pause:", labelX - 20, startY + spacing * 8 + 5, 0xAAAAAA);
-        
+        for (LabelLine label : labels) {
+            graphics.drawString(font, label.text(), label.x(), label.y(), 0xAAAAAA);
+        }
+
         super.render(graphics, mouseX, mouseY, partialTick);
+    }
+
+    private int estimatePanelHeight() {
+        int rows = 16;
+        int contentHeight = rows * 20 + (rows - 1) * (ROW_SPACING - 20);
+        return PANEL_PADDING + font.lineHeight + 12 + contentHeight + PANEL_PADDING;
+    }
+
+    private void configureLookAtPlaceholder() {
+        updateLookAtPlaceholder();
+        lookAtEdit.setResponder(value -> updateLookAtPlaceholder());
+    }
+
+    private void updateLookAtPlaceholder() {
+        lookAtEdit.setSuggestion(lookAtEdit.getValue().isEmpty() ? "Target X Y Z" : null);
+    }
+
+    private void openScreen(Screen screen) {
+        Minecraft mc = minecraft;
+        if (mc != null) {
+            mc.setScreen(screen);
+        }
     }
 
     @Override
@@ -187,7 +249,7 @@ public class NodeEditorScreen extends Screen {
     }
 
     @Override
-    public void renderBackground(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    public void renderBackground(@NotNull GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         // Do nothing here to prevent the default blur logic from firing
     }
 }
