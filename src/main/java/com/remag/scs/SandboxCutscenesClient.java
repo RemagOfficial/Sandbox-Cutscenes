@@ -162,6 +162,7 @@ public class SandboxCutscenesClient {
 
     @SubscribeEvent
     public static void onRenderFrame(RenderFrameEvent.Pre event) {
+        SimpleCameraManager.recordFrame();
         if (SimpleCameraManager.isActive() || SimpleCameraManager.isPreviewPlaybackActive()) {
             SimpleCameraManager.renderTick(Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false));
         }

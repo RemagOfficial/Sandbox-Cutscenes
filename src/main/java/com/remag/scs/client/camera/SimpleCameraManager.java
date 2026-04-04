@@ -60,6 +60,7 @@ public class SimpleCameraManager {
     private static float lastRecordedYaw = 0;
     private static float lastRecordedPitch = 0;
     private static boolean hasLastRecorded = false;
+    private static long lastRecordSampleNanos = -1L;
 
     private static SimpleCameraEntity camera;
     private static boolean active = false;
@@ -136,9 +137,7 @@ public class SimpleCameraManager {
     // Texture event state
     private static final List<ActiveTexture> ACTIVE_TEXTURES = new ArrayList<>();
     
-    // Thresholds for adding new points
-    private static final double posThreshold = 0.1; // Minimum distance to move before adding a new point
-    private static final double rotThreshold = 5.0; // Minimum rotation in degrees before adding a new point
+    // Thresholds come from config so users can tune recording sensitivity.
     
     // Error handling
     public static void sendError(String message) {
@@ -336,6 +335,7 @@ public class SimpleCameraManager {
         if (enabled) {
             // Reset last recorded position and rotation when starting a new recording
             hasLastRecorded = false;
+            lastRecordSampleNanos = -1L;
             nextRecordTick = 0; // Record immediately on next tick
             
             if (MC.player != null) {
@@ -345,6 +345,8 @@ public class SimpleCameraManager {
             if (MC.player != null) {
                 MC.player.displayClientMessage(Component.literal("§aStopped recording camera path"), true);
             }
+            nextRecordTick = -1;
+            lastRecordSampleNanos = -1L;
         }
     }
 
@@ -1104,7 +1106,21 @@ public class SimpleCameraManager {
         }
     }
 
-    private static void addRecordedPoint(Vec3 pos, float yaw, float pitch, float roll, float fov) {
+    private static long nextRecordedDurationMs() {
+        int intervalTicks = Config.RECORDING_INTERVAL_TICKS.get();
+        if (intervalTicks > 0) {
+            return intervalTicks * 50L;
+        }
+
+        long now = System.nanoTime();
+        long durationMs = lastRecordSampleNanos < 0
+                ? 50L
+                : Math.max(1L, Math.round((now - lastRecordSampleNanos) / 1_000_000.0));
+        lastRecordSampleNanos = now;
+        return durationMs;
+    }
+
+    private static void addRecordedPoint(Vec3 pos, float yaw, float pitch, float roll, float fov, long durationMs) {
         var allPaths = CameraPathRenderer.getAllPaths();
         if (allPaths.size() > 1) return;
         
@@ -1114,9 +1130,8 @@ public class SimpleCameraManager {
         List<CameraPathRenderer.NodeData> currentNodes = allPaths.get(activeId);
         if (currentNodes == null) return;
         
-        // For recorded points, always use duration based on recording interval
-        long durationMs = Config.RECORDING_INTERVAL_TICKS.get() * 50L; // 1 tick = 50ms
-        
+        long clampedDurationMs = Math.max(1L, durationMs);
+
         CameraPathRenderer.NodeData newNode = new CameraPathRenderer.NodeData(
             pos,
             yaw,
@@ -1129,7 +1144,7 @@ public class SimpleCameraManager {
         );
 
         // Explicitly set duration and clear speed for recorded points
-        newNode.setDuration(durationMs);
+        newNode.setDuration(clampedDurationMs);
         newNode.setSpeed(null); // Clear speed to ensure duration is used
         
         currentNodes.add(newNode);
@@ -1162,6 +1177,8 @@ public class SimpleCameraManager {
         
         // Check if we've moved enough to add a new point
         if (hasLastRecorded) {
+            double posThreshold = Config.POSITION_THRESHOLD.get();
+            double rotThreshold = Config.ROTATION_THRESHOLD.get();
             double distanceMoved = playerPos.distanceToSqr(lastRecordedPos);
             double yawDiff = Math.abs(Mth.wrapDegrees(yaw - lastRecordedYaw));
             double pitchDiff = Math.abs(Mth.wrapDegrees(pitch - lastRecordedPitch));
@@ -1175,7 +1192,7 @@ public class SimpleCameraManager {
         
         if (recording) {
             // For recording, use the dedicated method that always uses duration
-            addRecordedPoint(playerPos, yaw, pitch, roll, fov);
+            addRecordedPoint(playerPos, yaw, pitch, roll, fov, nextRecordedDurationMs());
             return;
         }
         
@@ -1469,24 +1486,30 @@ public class SimpleCameraManager {
                 applyRecordingMovementDamping();
             }
 
-            int now = MC.gui != null ? MC.gui.getGuiTicks() : 0;
-            if (nextRecordTick == -1) {
-                nextRecordTick = now;
-            }
-            if (now >= nextRecordTick) {
-                if (hasActivePaths() && !isActive()) {
-                    if (MC.player != null) {
-                        addRecordedPoint(
-                                MC.player.position(),
-                                MC.player.getYRot(),
-                                MC.player.getXRot(),
-                                0, // roll
-                                1.0f // fov
-                        );
-                    }
+            int interval = Config.RECORDING_INTERVAL_TICKS.get();
+            if (interval > 0) {
+                int now = MC.gui != null ? MC.gui.getGuiTicks() : 0;
+                if (nextRecordTick == -1) {
+                    nextRecordTick = now;
                 }
-                int interval = Config.RECORDING_INTERVAL_TICKS.get();
-                nextRecordTick = now + Math.max(1, interval);
+                if (now >= nextRecordTick) {
+                    if (hasActivePaths() && !isActive() && MC.player != null) {
+                        addNodeAtPlayer();
+                    }
+                    nextRecordTick = now + interval;
+                }
+            } else {
+                // For interval 0, keep positional sampling on client ticks to avoid noisy movement paths.
+                int now = MC.gui != null ? MC.gui.getGuiTicks() : 0;
+                if (nextRecordTick == -1) {
+                    nextRecordTick = now;
+                }
+                if (now >= nextRecordTick) {
+                    if (hasActivePaths() && !isActive() && MC.player != null) {
+                        addNodeAtPlayer();
+                    }
+                    nextRecordTick = now + 1;
+                }
             }
         }
 
@@ -1650,6 +1673,17 @@ public class SimpleCameraManager {
         }
     }
 
+    public static void recordFrame() {
+        if (!Config.DEVELOPER_MODE.get() || !recording) return;
+        if (Config.RECORDING_INTERVAL_TICKS.get() > 0) return;
+        if (!hasActivePaths() || isActive() || MC.player == null) return;
+
+        // Keep per-frame recording for stationary mouse-look only.
+        if (MC.player.getDeltaMovement().lengthSqr() > 1.0E-6) return;
+
+        addNodeAtPlayer();
+    }
+
     private static void processNextMove() {
         QueuedMove next = MOVE_QUEUE.poll();
         if (next != null) {
@@ -1679,19 +1713,19 @@ public class SimpleCameraManager {
 
         // Calculate movement parameters
         double distance = moveStartPos.distanceTo(moveTargetPos);
-        if (distance <= 0.0001) {
-            // If no movement needed, just update orientation and schedule next move
-            apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
-            pauseEndTick = move.postDelay > 0 ? MC.gui.getGuiTicks() + (int)(move.postDelay / 50) : 0;
-            isMoving = false;
-            return;
-        }
 
         // Calculate duration based on whether this is a recorded point (duration) or manual point (speed)
         if (move.duration != null) {
             // For recorded points: use the specified duration (converting ms to ticks)
             moveDurationTicks = (int)(move.duration / 50);
         } else {
+            if (distance <= 0.0001) {
+                // Manual path nodes with no positional change should still settle immediately.
+                apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
+                pauseEndTick = move.postDelay > 0 ? MC.gui.getGuiTicks() + (int)(move.postDelay / 50) : 0;
+                isMoving = false;
+                return;
+            }
             // For manual points: calculate duration based on speed and distance
             // speed 1.0 = 1 block per second, 2.0 = 2 blocks per second, etc.
             double blocksPerSecond = move.speed; // No additional scaling for more intuitive control

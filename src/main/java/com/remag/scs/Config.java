@@ -44,9 +44,9 @@ public class Config {
                 .define("recordingToolItem", "minecraft:stick");
 
         RECORDING_INTERVAL_TICKS = BUILDER
-                .comment("How often to check for position/rotation changes while recording (in client ticks)")
+                .comment("How often to check for position/rotation changes while recording (in client ticks). Set to 0 to sample every client tick.")
                 .translation("config.scs.recording.recordingIntervalTicks")
-                .defineInRange("recordingIntervalTicks", 1, 1, 20);
+                .defineInRange("recordingIntervalTicks", 1, 0, 20);
 
         INSTANT_RECORDING_MOVEMENT = BUILDER
                 .comment("Disable acceleration and momentum while recording so movement is instant (sneak/walk/sprint speeds)")
