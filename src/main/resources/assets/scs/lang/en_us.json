@@ -6,6 +6,7 @@
   "key.scs.clear": "Clear All Previews",
   "key.scs.timed_events": "Open Timed Events Editor",
   "key.scs.prop_camera": "Toggle Prop Camera Playback",
+  "key.scs.instant_movement": "Toggle Instant Movement",
 
   "config.scs.developer.developerMode": "Developer Mode",
   "config.scs.developer.showPropCameraFrustum": "Show Prop Camera Frustum",

@@ -3,6 +3,7 @@ package com.remag.scs;
 import com.remag.scs.client.render.CameraPathRenderer;
 import com.remag.scs.client.camera.SimpleCameraManager;
 import com.remag.scs.client.render.EventEditorScreen;
+import com.remag.scs.client.render.MultiNodeEditorScreen;
 import com.remag.scs.client.render.NodeEditorScreen;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -72,6 +73,12 @@ public class SandboxCutscenesClient {
             "key.categories.scs"
     );
 
+    public static final KeyMapping TOGGLE_INSTANT_MOVEMENT = new KeyMapping(
+            "key.scs.instant_movement",
+            GLFW.GLFW_KEY_I,
+            "key.categories.scs"
+    );
+
     public SandboxCutscenesClient(ModContainer container) {
         // Allows NeoForge to create a config screen for this mod's configs.
         // The config screen is accessed by going to the Mods screen > clicking on your mod > clicking on config.
@@ -92,6 +99,7 @@ public class SandboxCutscenesClient {
             event.register(CLEAR_RENDER);
             event.register(OPEN_TIMED_EVENTS);
             event.register(TOGGLE_PROP_CAMERA);
+            event.register(TOGGLE_INSTANT_MOVEMENT);
         }
     }
 
@@ -99,6 +107,11 @@ public class SandboxCutscenesClient {
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) return;
+
+        if (CameraPathRenderer.getToolItemMode() != CameraPathRenderer.ToolItemMode.RECORDING
+                && SimpleCameraManager.isRecording()) {
+            SimpleCameraManager.setRecording(false);
+        }
 
         if (Config.DEVELOPER_MODE.get()) {
             while (RERUN_CUTSCENE.consumeClick()) {
@@ -153,6 +166,14 @@ public class SandboxCutscenesClient {
                 List<String> timedNames = SimpleCameraManager.getTimedEventNames();
                 String initialTimed = timedNames.isEmpty() ? null : timedNames.getFirst();
                 mc.setScreen(new EventEditorScreen(initialTimed));
+            }
+
+            while (TOGGLE_INSTANT_MOVEMENT.consumeClick()) {
+                if (mc.player != null && (mc.player.isCreative() || mc.player.isSpectator())) {
+                    SimpleCameraManager.toggleInstantMovement();
+                } else {
+                    mc.player.displayClientMessage(Component.literal("§c[Sandbox Cutscenes] Instant movement is only available in Creative or Spectator modes."), true);
+                }
             }
         }
 
@@ -270,17 +291,69 @@ public class SandboxCutscenesClient {
         Minecraft mc = Minecraft.getInstance();
         if (!Config.DEVELOPER_MODE.get() || !CameraPathRenderer.isVisible() || SimpleCameraManager.isActive() || mc.screen != null) return;
 
+        boolean holdingTool = false;
+        if (mc.player != null) {
+            ItemStack held = mc.player.getMainHandItem();
+            String heldId = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
+            String toolId = Config.RECORDING_TOOL_ITEM.get();
+            holdingTool = toolId != null && toolId.equals(heldId);
+        }
+
         if (event.getButton() == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
             if (event.getAction() == GLFW.GLFW_PRESS) {
-                boolean isNodeInteraction = CameraPathRenderer.getHoveredNode() != null || CameraPathRenderer.isDragging();
+                boolean isNodeInteraction = CameraPathRenderer.getHoveredNode() != null
+                        || CameraPathRenderer.hasHoveredCurveHandle()
+                        || CameraPathRenderer.isDragging();
                 boolean isSneaking = mc.player != null && mc.player.isShiftKeyDown();
+                boolean toolNodeDrag = holdingTool
+                        && CameraPathRenderer.getToolItemMode() == CameraPathRenderer.ToolItemMode.NODE_MOVEMENT
+                        && isNodeInteraction;
+                boolean toolMultiSelect = holdingTool
+                        && CameraPathRenderer.getToolItemMode() == CameraPathRenderer.ToolItemMode.MULTISELECT;
 
                 if (isNodeInteraction) {
                     // Always consume node left-clicks so they do not hit blocks behind the node.
                     event.setCanceled(true);
                 }
 
-                if (isSneaking) {
+                if (toolMultiSelect) {
+                    CameraPathRenderer.NodeData hovered = CameraPathRenderer.getHoveredNode();
+
+                    // In multiselect mode, a selected node click toggles group drag.
+                    if (hovered != null && CameraPathRenderer.isNodeSelected(hovered) && CameraPathRenderer.getSelectedNodeCount() > 1) {
+                        boolean wasDragging = CameraPathRenderer.isDragging();
+                        boolean nowDragging = CameraPathRenderer.toggleDragging();
+                        if (mc.player != null) {
+                            mc.player.displayClientMessage(Component.literal(nowDragging
+                                    ? "§aMoving selected nodes (click again to stop)."
+                                    : "§aStopped moving selected nodes."), true);
+                        }
+                        return;
+                    }
+
+                    // Range select: click start node, then click end node to select inclusive range.
+                    if (hovered != null) {
+                        if (!CameraPathRenderer.hasSelectionAnchor()) {
+                            CameraPathRenderer.beginSelectionRange(hovered);
+                            if (mc.player != null) {
+                                mc.player.displayClientMessage(Component.literal("§bSelection start: node #" + hovered.index + ". Click another node to select range."), true);
+                            }
+                        } else {
+                            int count = CameraPathRenderer.finalizeSelectionRange(hovered);
+                            if (mc.player != null) {
+                                mc.player.displayClientMessage(Component.literal("§bSelected " + count + " node(s)."), true);
+                            }
+                        }
+                    } else if (!CameraPathRenderer.isDragging()) {
+                        CameraPathRenderer.clearSelection();
+                        if (mc.player != null) {
+                            mc.player.displayClientMessage(Component.literal("§7Cleared multiselection."), true);
+                        }
+                    }
+                    return;
+                }
+
+                if (isSneaking || toolNodeDrag) {
                     boolean wasDragging = CameraPathRenderer.isDragging();
                     boolean nowDragging = CameraPathRenderer.toggleDragging();
 
@@ -291,9 +364,10 @@ public class SandboxCutscenesClient {
                         } else if (nowDragging) {
                             CameraPathRenderer.NodeData hovered = CameraPathRenderer.getHoveredNode();
                             String nodeLabel = hovered != null ? String.valueOf(hovered.index) : "";
-                            mc.player.displayClientMessage(Component.literal("§aMoving node " + nodeLabel + " (click again to stop, scroll to change distance)."), true);
+                            String label = nodeLabel.isEmpty() ? "curve handle" : ("node " + nodeLabel);
+                            mc.player.displayClientMessage(Component.literal("§aMoving " + label + " (click again to stop, scroll to change distance)."), true);
                         } else {
-                            mc.player.displayClientMessage(Component.literal("§eSneak and left-click a node to move it."), true);
+                            mc.player.displayClientMessage(Component.literal("§eLeft-click a node or curve handle to move it (or hold sneak)."), true);
                         }
                     }
                 }
@@ -303,15 +377,31 @@ public class SandboxCutscenesClient {
         if (event.getButton() == GLFW.GLFW_MOUSE_BUTTON_RIGHT && event.getAction() == GLFW.GLFW_PRESS) {
             // Recording tool takes priority so you can always toggle recording,
             // even if a node/event is currently hovered.
-            if (mc.player != null) {
-                ItemStack held = mc.player.getMainHandItem();
-                String heldId = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
-                String toolId = Config.RECORDING_TOOL_ITEM.get();
-                if (toolId != null && toolId.equals(heldId)) {
+            if (mc.player != null && holdingTool) {
+                if (mc.player.isShiftKeyDown()) {
+                    CameraPathRenderer.ToolItemMode mode = CameraPathRenderer.toggleToolItemMode();
+                    if (mode != CameraPathRenderer.ToolItemMode.RECORDING && SimpleCameraManager.isRecording()) {
+                        SimpleCameraManager.setRecording(false);
+                    }
+                    String modeLabel = switch (mode) {
+                        case RECORDING -> "recording";
+                        case NODE_MOVEMENT -> "node movement";
+                        case MULTISELECT -> "multiselect";
+                    };
+                    mc.player.displayClientMessage(Component.literal("§bTool Mode: " + modeLabel), true);
+                } else if (CameraPathRenderer.getToolItemMode() == CameraPathRenderer.ToolItemMode.RECORDING) {
                     SimpleCameraManager.setRecording(!SimpleCameraManager.isRecording());
-                    event.setCanceled(true); // Prevent stick/item use
-                    return;
+                } else if (CameraPathRenderer.getToolItemMode() == CameraPathRenderer.ToolItemMode.MULTISELECT) {
+                    if (CameraPathRenderer.getSelectedNodeCount() > 1) {
+                        Minecraft.getInstance().setScreen(new MultiNodeEditorScreen(CameraPathRenderer.getSelectedNodes()));
+                    } else if (mc.player != null) {
+                        mc.player.displayClientMessage(Component.literal("§eSelect at least 2 nodes in multiselect mode first."), true);
+                    }
+                } else {
+                    mc.player.displayClientMessage(Component.literal("§bTool is in node movement mode."), true);
                 }
+                event.setCanceled(true); // Prevent stick/item use
+                return;
             }
 
             // Preserve existing editor right-click behaviors

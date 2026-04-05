@@ -54,7 +54,8 @@ public class SimpleCameraManager {
 
     private static boolean recording = false;
     private static int nextRecordTick = -1;
-    
+    private static boolean instantMovementEnabled = false;
+
     // Last recorded position and rotation for threshold checks
     private static Vec3 lastRecordedPos = Vec3.ZERO;
     private static float lastRecordedYaw = 0;
@@ -73,6 +74,7 @@ public class SimpleCameraManager {
     private static ResourceLocation currentPreviewLocation;
     private static Vec3 previewBaseOffset = Vec3.ZERO;
     private static Vec3 activeBaseOffset = Vec3.ZERO; // Track world origin of running cutscene
+    private static JsonObject originalCutsceneJson;
     private static JsonElement originalStartJson;
     private static List<CutsceneData.Event> originalEvents; // Cache for saving
     private static List<String> originalStartEvents; // Updated to List
@@ -107,6 +109,7 @@ public class SimpleCameraManager {
     private static EasingType moveEasing;
     private static String moveType;
     private static Vec3 moveP0, moveP3;
+    private static Vec3 moveCurveControl;
 
     // Helper
     private static float currentYaw;
@@ -159,20 +162,21 @@ public class SimpleCameraManager {
                             String movement, 
                             @Nullable Vec3 p0, 
                             @Nullable Vec3 p3, 
+                            @Nullable Vec3 curveControl,
                             @Nullable List<String> eventNames) {
         
         // Constructor for manual movement with speed
         public static QueuedMove withSpeed(Vec3 pos, float yaw, float pitch, float roll, float fov,
                                          double speed, long postDelay, EasingType easing,
-                                         String movement, Vec3 p0, Vec3 p3, List<String> eventNames) {
-            return new QueuedMove(pos, yaw, pitch, roll, fov, speed, null, postDelay, easing, movement, p0, p3, eventNames);
+                                         String movement, Vec3 p0, Vec3 p3, Vec3 curveControl, List<String> eventNames) {
+            return new QueuedMove(pos, yaw, pitch, roll, fov, speed, null, postDelay, easing, movement, p0, p3, curveControl, eventNames);
         }
         
         // Constructor for recorded movement with duration
         public static QueuedMove withDuration(Vec3 pos, float yaw, float pitch, float roll, float fov,
                                             long durationMs, long postDelay, EasingType easing,
-                                            String movement, Vec3 p0, Vec3 p3, List<String> eventNames) {
-            return new QueuedMove(pos, yaw, pitch, roll, fov, 0, durationMs, postDelay, easing, movement, p0, p3, eventNames);
+                                            String movement, Vec3 p0, Vec3 p3, Vec3 curveControl, List<String> eventNames) {
+            return new QueuedMove(pos, yaw, pitch, roll, fov, 0, durationMs, postDelay, easing, movement, p0, p3, curveControl, eventNames);
         }
     }
 
@@ -225,6 +229,7 @@ public class SimpleCameraManager {
             public EasingType easing = EasingType.LINEAR;
             public String movement = "linear";
             public Double lookX, lookY, lookZ;
+            public Double curveX, curveY, curveZ;
             public JsonElement event; // Can be String or JsonArray
 
             // Getter for speed (returns null for recorded points)
@@ -348,6 +353,19 @@ public class SimpleCameraManager {
             nextRecordTick = -1;
             lastRecordSampleNanos = -1L;
         }
+    }
+
+    public static void toggleInstantMovement() {
+        instantMovementEnabled = !instantMovementEnabled;
+        if (MC.player != null) {
+            MC.player.displayClientMessage(Component.literal(instantMovementEnabled
+                ? "§aInstant movement §bENABLED"
+                : "§aInstant movement §cDISABLED"), true);
+        }
+    }
+
+    public static boolean isInstantMovementEnabled() {
+        return instantMovementEnabled;
     }
 
     public record EventInfo(String type, String data) {}
@@ -749,6 +767,7 @@ public class SimpleCameraManager {
         }
 
         currentPreviewLocation = location;
+        originalCutsceneJson = null;
 
         try {
             Optional<Resource> resource = MC.getResourceManager().getResource(location);
@@ -758,7 +777,9 @@ public class SimpleCameraManager {
             }
 
             try (InputStreamReader reader = new InputStreamReader(resource.get().open())) {
-                CutsceneData data = GSON.fromJson(reader, CutsceneData.class);
+                JsonElement sourceJson = GSON.fromJson(reader, JsonElement.class);
+                originalCutsceneJson = sourceJson != null && sourceJson.isJsonObject() ? sourceJson.getAsJsonObject().deepCopy() : null;
+                CutsceneData data = GSON.fromJson(sourceJson, CutsceneData.class);
                 if (data == null || data.points == null) return;
 
                 originalStartJson = data.start;
@@ -795,6 +816,9 @@ public class SimpleCameraManager {
                     if (p.lookX != null && p.lookY != null && p.lookZ != null) {
                         // Apply baseOffset to the saved relative lookAt coordinates
                         node.setLookAt(new Vec3(p.lookX + baseOffset.x, p.lookY + baseOffset.y, p.lookZ + baseOffset.z));
+                    }
+                    if (p.curveX != null && p.curveY != null && p.curveZ != null) {
+                        node.setCurveControl(new Vec3(p.curveX + baseOffset.x, p.curveY + baseOffset.y, p.curveZ + baseOffset.z));
                     }
                     nodes.add(node);
                 }
@@ -842,7 +866,7 @@ public class SimpleCameraManager {
                     Vec3 p1 = start.pos;
                     Vec3 p2 = end.pos;
                     Vec3 p3 = nodes.get(Math.min(nodes.size() - 1, i + 2)).pos;
-                    return CameraPathRenderer.calculateCatmullRom(p0, p1, p2, p3, t);
+                    return CameraPathRenderer.calculateCurve(p0, p1, p2, p3, end.curveControl, t);
                 }
 
                 return start.pos.lerp(end.pos, t);
@@ -996,6 +1020,7 @@ public class SimpleCameraManager {
                         node.movement != null ? node.movement : "linear",
                         p0,
                         p3,
+                        node.curveControl,
                         node.events != null ? new ArrayList<>(node.events) : new ArrayList<>()
                 ));
             } else {
@@ -1011,6 +1036,7 @@ public class SimpleCameraManager {
                         node.movement != null ? node.movement : "linear",
                         p0,
                         p3,
+                        node.curveControl,
                         node.events != null ? new ArrayList<>(node.events) : new ArrayList<>()
                 ));
             }
@@ -1350,6 +1376,9 @@ public class SimpleCameraManager {
 
             Vec3 p0 = i == 0 ? baseOffset : new Vec3(data.points.get(i-1).x + baseOffset.x, data.points.get(i-1).y + baseOffset.y, data.points.get(i-1).z + baseOffset.z);
             Vec3 p3 = i >= data.points.size() - 1 ? targetPos : new Vec3(data.points.get(i+1).x + baseOffset.x, data.points.get(i+1).y + baseOffset.y, data.points.get(i+1).z + baseOffset.z);
+            Vec3 curveControl = (p.curveX != null && p.curveY != null && p.curveZ != null)
+                    ? new Vec3(p.curveX + baseOffset.x, p.curveY + baseOffset.y, p.curveZ + baseOffset.z)
+                    : null;
 
             synchronized (MOVE_LOCK) {
                 // Use duration for recorded points, speed for manual points
@@ -1367,6 +1396,7 @@ public class SimpleCameraManager {
                         p.movement != null ? p.movement : "linear",
                         p0,
                         p3,
+                        curveControl,
                         parseEventList(p.event)
                     ));
                 } else {
@@ -1383,6 +1413,7 @@ public class SimpleCameraManager {
                         p.movement != null ? p.movement : "linear",
                         p0,
                         p3,
+                        curveControl,
                         parseEventList(p.event)
                     ));
                 }
@@ -1481,6 +1512,11 @@ public class SimpleCameraManager {
     /* ---------------- Queue / Movement ---------------- */
 
     public static void tick() {
+        // Apply instant movement damping at all times when enabled (not just during recording)
+        if (instantMovementEnabled) {
+            applyRecordingMovementDamping();
+        }
+
         if (Config.DEVELOPER_MODE.get() && recording) {
             if (Config.INSTANT_RECORDING_MOVEMENT.get()) {
                 applyRecordingMovementDamping();
@@ -1643,8 +1679,8 @@ public class SimpleCameraManager {
             // Interpolate position
             Vec3 newPos;
             if ("curved".equals(moveType) && moveP0 != null && moveP3 != null) {
-                newPos = CameraPathRenderer.calculateCatmullRom(
-                    moveP0, moveStartPos, moveTargetPos, moveP3, (float) easedT);
+                newPos = CameraPathRenderer.calculateCurve(
+                    moveP0, moveStartPos, moveTargetPos, moveP3, moveCurveControl, (float) easedT);
             } else {
                 // Use linear interpolation with optional smoothing
                 newPos = moveStartPos.lerp(moveTargetPos, easedT);
@@ -1740,6 +1776,7 @@ public class SimpleCameraManager {
         moveType = move.movement != null ? move.movement : "linear";
         moveP0 = move.p0;
         moveP3 = move.p3;
+        moveCurveControl = move.curveControl;
 
         // Schedule any post-move delay
         pauseEndTick = move.postDelay > 0 ? moveStartTick + moveDurationTicks + (int)(move.postDelay / 50) : 0;
@@ -1755,8 +1792,8 @@ public class SimpleCameraManager {
             // Calculate first frame position
             Vec3 newPos;
             if ("curved".equals(moveType) && moveP0 != null && moveP3 != null) {
-                newPos = CameraPathRenderer.calculateCatmullRom(
-                    moveP0, moveStartPos, moveTargetPos, moveP3, (float)easedT);
+                newPos = CameraPathRenderer.calculateCurve(
+                    moveP0, moveStartPos, moveTargetPos, moveP3, moveCurveControl, (float)easedT);
             } else {
                 newPos = moveStartPos.lerp(moveTargetPos, easedT);
             }
@@ -2016,13 +2053,19 @@ public class SimpleCameraManager {
         }
 
         String recordingTool = Config.RECORDING_TOOL_ITEM.get();
+        String toolMode = switch (CameraPathRenderer.getToolItemMode()) {
+            case RECORDING -> "recording";
+            case NODE_MOVEMENT -> "node movement";
+            case MULTISELECT -> "multiselect";
+        };
         long totalDurationMs = getActiveCutsceneLengthMs();
         long previewElapsedMs = getPreviewPlaybackElapsedMs();
         List<DurationMarker> durationMarkers = buildDurationMarkers();
         List<OverlayEntry> statusOverlay = new ArrayList<>();
         statusOverlay.add(new OverlayEntry(Component.literal("Sandbox Cutscenes Editor"), 0x66FFAA));
         statusOverlay.add(new OverlayEntry(Component.literal("Path: " + activePath + " | Paths: " + pathCount + " | Nodes: " + nodeCount), 0xFFFFFF));
-        statusOverlay.add(new OverlayEntry(Component.literal("Recording: " + (recording ? "ON" : "OFF") + " (" + Config.RECORDING_INTERVAL_TICKS.get() + "t, " + (Config.INSTANT_RECORDING_MOVEMENT.get() ? "instant" : "vanilla") + ")"), recording ? 0x55FF55 : 0xFFAA55));
+        statusOverlay.add(new OverlayEntry(Component.literal("Tool Mode: " + toolMode + " | Selected: " + CameraPathRenderer.getSelectedNodeCount()), 0x7DCBFF));
+        statusOverlay.add(new OverlayEntry(Component.literal("Recording: " + (recording ? "ON" : "OFF") + " (" + Config.RECORDING_INTERVAL_TICKS.get() + "t, " + (Config.INSTANT_RECORDING_MOVEMENT.get() || instantMovementEnabled ? "instant" : "vanilla") + ")"), recording ? 0x55FF55 : 0xFFAA55));
         statusOverlay.add(new OverlayEntry(Component.literal("Prop Camera: " + (previewPlaybackActive ? "RUNNING " + formatDurationMs(previewElapsedMs) + " / " + formatDurationMs(totalDurationMs) : "READY " + formatDurationMs(totalDurationMs))), previewPlaybackActive ? 0x55CCFF : 0xAAAAAA));
         if (previewPlaybackActive && camera != null) {
             Vec3 propPos = camera.position();
@@ -2038,12 +2081,16 @@ public class SimpleCameraManager {
         List<OverlayEntry> controlsOverlay = new ArrayList<>();
         controlsOverlay.add(new OverlayEntry(Component.literal("Controls"), 0xFFD966));
         controlsOverlay.add(new OverlayEntry(Component.empty().append(MC.options.keyShift.getTranslatedKeyMessage()).append(Component.literal(" + Left Click: start/stop moving hovered node")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(Component.literal("Left Click with ")).append(Component.literal(recordingTool)).append(Component.literal(" in node movement mode: move nodes/handles")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(Component.literal("Left Click with ")).append(Component.literal(recordingTool)).append(Component.literal(" in multiselect mode: pick start/end range")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.literal("Right Click with tool in multiselect: edit shared attrs"), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.literal("Left Click on hovered node: consume click / block world hit"), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.literal("Mouse Wheel while moving node: change drag distance"), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.literal("Right Click on node: open node editor"), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.literal("Right Click on event icon: open event editor"), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.literal("Right Click on timed marker: open timed event editor"), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.empty().append(Component.literal("Right Click with ")).append(Component.literal(recordingTool)).append(Component.literal(": toggle recording")), 0xBBBBBB));
+        controlsOverlay.add(new OverlayEntry(Component.empty().append(Component.literal("Shift + Right Click with ")).append(Component.literal(recordingTool)).append(Component.literal(": switch tool mode")), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.ADD_NODE.getTranslatedKeyMessage()).append(Component.literal(": add node at player")), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.TOGGLE_PROP_CAMERA.getTranslatedKeyMessage()).append(Component.literal(": start/stop prop-camera playback")), 0xBBBBBB));
         controlsOverlay.add(new OverlayEntry(Component.empty().append(SandboxCutscenesClient.SAVE_PATH.getTranslatedKeyMessage()).append(Component.literal(": save active path")), 0xBBBBBB));
@@ -2182,50 +2229,99 @@ public class SimpleCameraManager {
 
         try {
             List<CameraPathRenderer.NodeData> nodes = allPaths.get(activeId);
-            CutsceneData data = new CutsceneData();
-            data.events = originalEvents; // Restore cached events
-            data.startEvent = GSON.toJsonTree(originalStartEvents);
-            data.endEvent = GSON.toJsonTree(originalEndEvents);
+            JsonObject root = originalCutsceneJson != null ? originalCutsceneJson.deepCopy() : new JsonObject();
+
+            if (originalEvents != null) {
+                root.add("events", GSON.toJsonTree(originalEvents));
+            } else {
+                root.remove("events");
+            }
+
+            if (originalStartEvents != null) {
+                root.add("startEvent", GSON.toJsonTree(originalStartEvents));
+            } else {
+                root.remove("startEvent");
+            }
+
+            if (originalEndEvents != null) {
+                root.add("endEvent", GSON.toJsonTree(originalEndEvents));
+            } else {
+                root.remove("endEvent");
+            }
+
             CameraPathRenderer.NodeData startNode = nodes.getFirst();
 
             if (originalStartJson != null && originalStartJson.isJsonPrimitive() &&
                 originalStartJson.getAsString().equals("relative")) {
-                data.start = originalStartJson;
-                data.yaw = startNode.yaw;
-                data.pitch = startNode.pitch;
+                root.add("start", originalStartJson.deepCopy());
+                root.addProperty("yaw", startNode.yaw);
+                root.addProperty("pitch", startNode.pitch);
+                root.addProperty("roll", startNode.roll);
             } else {
-                CutsceneData.Point startPoint = new CutsceneData.Point();
-                startPoint.x = startNode.pos.x;
-                startPoint.y = startNode.pos.y;
-                startPoint.z = startNode.pos.z;
-                startPoint.yaw = startNode.yaw;
-                startPoint.pitch = startNode.pitch;
-                data.start = GSON.toJsonTree(startPoint);
+                JsonObject startPoint = root.has("start") && root.get("start").isJsonObject()
+                    ? root.getAsJsonObject("start").deepCopy()
+                    : new JsonObject();
+                startPoint.addProperty("x", startNode.pos.x);
+                startPoint.addProperty("y", startNode.pos.y);
+                startPoint.addProperty("z", startNode.pos.z);
+                startPoint.addProperty("yaw", startNode.yaw);
+                startPoint.addProperty("pitch", startNode.pitch);
+                startPoint.addProperty("roll", startNode.roll);
+                root.add("start", startPoint);
             }
 
-            data.points = new ArrayList<>();
+            JsonArray existingPoints = root.has("points") && root.get("points").isJsonArray()
+                ? root.getAsJsonArray("points")
+                : new JsonArray();
+            JsonArray pointsOut = new JsonArray();
             for (int i = 1; i < nodes.size(); i++) {
                 CameraPathRenderer.NodeData node = nodes.get(i);
-                CutsceneData.Point p = new CutsceneData.Point();
-                p.x = node.pos.x - startNode.pos.x;
-                p.y = node.pos.y - startNode.pos.y;
-                p.z = node.pos.z - startNode.pos.z;
-                p.yaw = node.yaw;
-                p.pitch = node.pitch;
-                p.setSpeed(node.getSpeed());
-                p.setDuration(node.getDuration());
-                p.pause = node.pause;
-                p.easing = node.easing;
-                p.movement = node.movement;
-                p.event = GSON.toJsonTree(node.events); // Preserve the assigned event list
-                if (node.lookAt != null) {
-                    // Save as relative to the start node
-                    p.lookX = node.lookAt.x - startNode.pos.x;
-                    p.lookY = node.lookAt.y - startNode.pos.y;
-                    p.lookZ = node.lookAt.z - startNode.pos.z;
+                JsonObject p = (i - 1 < existingPoints.size() && existingPoints.get(i - 1).isJsonObject())
+                    ? existingPoints.get(i - 1).getAsJsonObject().deepCopy()
+                    : new JsonObject();
+
+                p.addProperty("x", node.pos.x - startNode.pos.x);
+                p.addProperty("y", node.pos.y - startNode.pos.y);
+                p.addProperty("z", node.pos.z - startNode.pos.z);
+                p.addProperty("yaw", node.yaw);
+                p.addProperty("pitch", node.pitch);
+                p.addProperty("roll", node.roll);
+                p.addProperty("fov", node.fov);
+                p.addProperty("pause", node.pause);
+                p.addProperty("easing", node.easing != null ? node.easing.name().toLowerCase() : EasingType.LINEAR.name().toLowerCase());
+                p.addProperty("movement", node.movement != null ? node.movement : "linear");
+                p.add("event", GSON.toJsonTree(node.events != null ? node.events : List.<String>of()));
+
+                if (node.getDuration() != null) {
+                    p.addProperty("duration", node.getDuration());
+                    p.remove("speed");
+                } else if (node.getSpeed() != null) {
+                    p.addProperty("speed", node.getSpeed());
+                    p.remove("duration");
                 }
-                data.points.add(p);
+
+                if (node.lookAt != null) {
+                    p.addProperty("lookX", node.lookAt.x - startNode.pos.x);
+                    p.addProperty("lookY", node.lookAt.y - startNode.pos.y);
+                    p.addProperty("lookZ", node.lookAt.z - startNode.pos.z);
+                } else {
+                    p.remove("lookX");
+                    p.remove("lookY");
+                    p.remove("lookZ");
+                }
+                if (node.curveControl != null) {
+                    // Save curve handle relative to the start node for resource-pack portability.
+                    p.addProperty("curveX", node.curveControl.x - startNode.pos.x);
+                    p.addProperty("curveY", node.curveControl.y - startNode.pos.y);
+                    p.addProperty("curveZ", node.curveControl.z - startNode.pos.z);
+                } else {
+                    p.remove("curveX");
+                    p.remove("curveY");
+                    p.remove("curveZ");
+                }
+                pointsOut.add(p);
             }
+            root.add("points", pointsOut);
 
             // Fixed Saving: Check physical directory directly
             File resourcePacksDir = new File(MC.gameDirectory, "resourcepacks");
@@ -2257,7 +2353,7 @@ public class SimpleCameraManager {
                 MC.player.displayClientMessage(Component.literal("§eSaving: " + saveFileName + " ..."), true);
             }
 
-            String json = GSON.newBuilder().setPrettyPrinting().create().toJson(data);
+            String json = GSON.newBuilder().setPrettyPrinting().create().toJson(root);
             int totalChars = json.length();
 
             CompletableFuture.runAsync(() -> {
