@@ -1653,6 +1653,10 @@ public class SimpleCameraManager {
         return start + diff * t;
     }
 
+    private static float angleDeltaAbs(float start, float end) {
+        return Math.abs(Mth.wrapDegrees(end - start));
+    }
+
     public static void renderTick(float partialTick) {
         if ((!active && !previewPlaybackActive) || camera == null) return;
 
@@ -1749,23 +1753,39 @@ public class SimpleCameraManager {
 
         // Calculate movement parameters
         double distance = moveStartPos.distanceTo(moveTargetPos);
+        float yawDelta = angleDeltaAbs(moveStartYaw, moveTargetYaw);
+        float pitchDelta = angleDeltaAbs(moveStartPitch, moveTargetPitch);
+        float rollDelta = angleDeltaAbs(moveStartRoll, moveTargetRoll);
+        float fovDelta = Math.abs(moveTargetFov - moveStartFov);
+        float maxRotationDelta = Math.max(yawDelta, Math.max(pitchDelta, rollDelta));
 
         // Calculate duration based on whether this is a recorded point (duration) or manual point (speed)
         if (move.duration != null) {
             // For recorded points: use the specified duration (converting ms to ticks)
-            moveDurationTicks = (int)(move.duration / 50);
+            moveDurationTicks = (int) Math.ceil(move.duration / 50.0);
         } else {
-            if (distance <= 0.0001) {
-                // Manual path nodes with no positional change should still settle immediately.
+            boolean noPositionalChange = distance <= 0.0001;
+            boolean noRotationalChange = maxRotationDelta <= 0.001f;
+            boolean noFovChange = fovDelta <= 0.0001f;
+            if (noPositionalChange && noRotationalChange && noFovChange) {
+                // True no-op segment: settle immediately.
                 apply(moveTargetPos, moveTargetYaw, moveTargetPitch, moveTargetRoll, moveTargetFov);
                 pauseEndTick = move.postDelay > 0 ? MC.gui.getGuiTicks() + (int)(move.postDelay / 50) : 0;
                 isMoving = false;
                 return;
             }
-            // For manual points: calculate duration based on speed and distance
-            // speed 1.0 = 1 block per second, 2.0 = 2 blocks per second, etc.
-            double blocksPerSecond = move.speed; // No additional scaling for more intuitive control
-            moveDurationTicks = Math.max(1, (int)((distance / blocksPerSecond) * 20)); // Convert seconds to ticks
+
+            // For manual points: interpolate by distance, or by angular delta for rotation-only segments.
+            double speedValue = move.speed;
+            double safeSpeed = Math.max(0.001, speedValue);
+            if (distance > 0.0001) {
+                // speed 1.0 = 1 block per second, 2.0 = 2 blocks per second, etc.
+                moveDurationTicks = (int) Math.ceil((distance / safeSpeed) * 20.0);
+            } else {
+                // Rotation-only nodes should never snap. Map speed to angular rate.
+                double degreesPerSecond = Math.max(30.0, safeSpeed * 90.0);
+                moveDurationTicks = (int) Math.ceil((maxRotationDelta / degreesPerSecond) * 20.0);
+            }
         }
 
         // Ensure minimum duration of 1 tick to avoid division by zero
