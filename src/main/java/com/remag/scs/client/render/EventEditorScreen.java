@@ -303,7 +303,7 @@ public class EventEditorScreen extends Screen {
     private int buildTextureControls(int fieldX, int labelX, int startY, JsonObject data) {
         texturePathEdit = addRenderableWidget(new EditBox(font, fieldX, startY, FULL_WIDTH, 20, Component.literal("Texture Path")));
         texturePathEdit.setValue(getString(data, "path", ""));
-        configurePlaceholder(texturePathEdit, "scm:textures/gui/example.png");
+        configurePlaceholder(texturePathEdit, "scs:textures/gui/example.png");
         labels.add(new LabelLine("Path", labelX, startY + 6));
 
         textureXEdit = addRenderableWidget(new EditBox(font, fieldX, startY + ROW_SPACING, FULL_WIDTH, 20, Component.literal("X")));
@@ -565,7 +565,7 @@ public class EventEditorScreen extends Screen {
                 data.addProperty("duration", 1000);
             }
             case "texture" -> {
-                data.addProperty("path", "scm:textures/gui/example.png");
+                data.addProperty("path", "scs:textures/gui/example.png");
                 data.addProperty("x", 0);
                 data.addProperty("y", 0);
                 data.addProperty("scale", 1.0f);

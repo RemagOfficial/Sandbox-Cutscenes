@@ -19,6 +19,7 @@ public class PlayerRendererMixin {
     private void onRenderHand(PoseStack poseStack, MultiBufferSource buffer, int combinedLight,
                               AbstractClientPlayer player, ModelPart rendererArm, ModelPart rendererArmwear,
                               CallbackInfo ci) {
+        // Only hide hand during actual cutscenes with SimpleCameraEntity
         if (SimpleCameraManager.isActive() &&
                 Minecraft.getInstance().getCameraEntity() instanceof SimpleCameraEntity) {
             ci.cancel(); // skip rendering the arm

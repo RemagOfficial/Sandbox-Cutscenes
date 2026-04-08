@@ -5,6 +5,7 @@
   "mixins": [],
   "client": [
     "EntityMixin",
+    @mobtrackingMixinEntry@
     "PlayerRendererMixin",
     "ItemInHandRendererMixin",
     "GameRendererMixin",

@@ -38,6 +38,7 @@ import com.google.gson.JsonObject;
 import com.remag.scs.Config;
 import net.minecraft.client.gui.GuiGraphics;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.platform.NativeImage;
 
 public class SimpleCameraManager {
 
@@ -65,6 +66,11 @@ public class SimpleCameraManager {
 
     private static SimpleCameraEntity camera;
     private static boolean active = false;
+    private static boolean externalCameraActive = false;
+    private static String externalCameraOwner;
+    private static int externalCameraLastUpdateTick = -1;
+    private static final int EXTERNAL_CAMERA_TIMEOUT_TICKS = 100;
+    private static Vec3 externalCameraPos = Vec3.ZERO;
     private static final int CAMERA_ENTITY_ID = -420;
     private static final int PROP_CAMERA_ENTITY_ID = -421;
     private static boolean previewPlaybackActive = false;
@@ -139,7 +145,9 @@ public class SimpleCameraManager {
 
     // Texture event state
     private static final List<ActiveTexture> ACTIVE_TEXTURES = new ArrayList<>();
-    
+    private static final Map<ResourceLocation, TextureDimensions> TEXTURE_DIMENSIONS_CACHE = new HashMap<>();
+    private static final Map<ResourceLocation, ResourceLocation> TEXTURE_RESOURCE_CACHE = new HashMap<>();
+
     // Thresholds come from config so users can tune recording sensitivity.
     
     // Error handling
@@ -150,7 +158,8 @@ public class SimpleCameraManager {
             LOGGER.error("[Sandbox Cutscenes] {}", message);
         }
     }
-    private record ActiveTexture(ResourceLocation texture, int x, int y, float scale, int startTick, int durationTicks, String fadeMode, boolean centered) {}
+    private record ActiveTexture(ResourceLocation texture, int x, int y, float scale, int startTick, int durationTicks, String fadeMode, boolean centered, int textureWidth, int textureHeight) {}
+    private record TextureDimensions(int width, int height) {}
     private record OverlayEntry(Component text, int color) {}
     private record DurationMarker(long timeMs, int order, int color, int count) {}
 
@@ -279,7 +288,7 @@ public class SimpleCameraManager {
         if (MC.level == null || !MC.level.isClientSide) return;
 
         synchronized (MOVE_LOCK) {
-            if (active || pendingData != null) {
+            if (active || pendingData != null || externalCameraActive) {
                 LOGGER.warn("Trigger at {} tried to run cutscene [{}] while one is already running.", origin, location);
                 return;
             }
@@ -599,7 +608,7 @@ public class SimpleCameraManager {
     }
 
     public static void togglePreviewPlayback() {
-        if (active || pendingData != null) {
+        if (active || pendingData != null || externalCameraActive) {
             sendError("Stop the active cutscene before starting prop-camera playback.");
             return;
         }
@@ -951,6 +960,11 @@ public class SimpleCameraManager {
             return;
         }
 
+        if (externalCameraActive) {
+            sendError("Release external camera control before starting prop-camera playback.");
+            return;
+        }
+
         List<CameraPathRenderer.NodeData> nodes = CameraPathRenderer.getPathNodes();
         if (nodes.size() < 2) {
             sendError("Preview at least two camera nodes before starting prop-camera playback.");
@@ -1061,6 +1075,10 @@ public class SimpleCameraManager {
         }
 
         if (camera != null) {
+            SimpleCameraEntity previousCamera = camera;
+            if (MC.getCameraEntity() == previousCamera && MC.player != null) {
+                MC.setCameraEntity(MC.player);
+            }
             camera.despawn();
             camera = null;
         }
@@ -1428,6 +1446,91 @@ public class SimpleCameraManager {
 
     public static boolean isActive() { return active; }
 
+    public static boolean isExternalCameraActive() {
+        return externalCameraActive;
+    }
+
+    public static boolean isCameraEntityActive() {
+        return (active || previewPlaybackActive || externalCameraActive) && camera != null;
+    }
+
+    public static boolean acquireExternalCamera(String ownerId) {
+        if (ownerId == null || ownerId.isBlank()) {
+            return false;
+        }
+        if (MC.level == null || MC.player == null) {
+            return false;
+        }
+
+        synchronized (MOVE_LOCK) {
+            if (active || previewPlaybackActive || pendingData != null) {
+                return false;
+            }
+            if (externalCameraActive) {
+                return ownerId.equals(externalCameraOwner);
+            }
+            externalCameraActive = true;
+            externalCameraOwner = ownerId;
+            externalCameraLastUpdateTick = MC.gui != null ? MC.gui.getGuiTicks() : 0;
+        }
+
+        // For external mode, we don't spawn a camera entity.
+        // Instead, we override camera rendering position/rotation via mixin while keeping MC.player as the active entity.
+        // This preserves player input while allowing camera position control.
+        Vec3 startPos = MC.player.getEyePosition(1.0f);
+        float startYaw = MC.player.getYRot();
+        float startPitch = MC.player.getXRot();
+        apply(startPos, startYaw, startPitch, 0.0f, 1.0f);
+        return true;
+    }
+
+    public static boolean updateExternalCameraPose(String ownerId, Vec3 pos, float yaw, float pitch, float roll, float fov) {
+        if (ownerId == null || ownerId.isBlank() || pos == null) {
+            return false;
+        }
+
+        synchronized (MOVE_LOCK) {
+            if (!externalCameraActive || !ownerId.equals(externalCameraOwner)) {
+                return false;
+            }
+            externalCameraPos = pos;
+            apply(pos, yaw, pitch, roll, fov);
+            externalCameraLastUpdateTick = MC.gui != null ? MC.gui.getGuiTicks() : externalCameraLastUpdateTick;
+            return true;
+        }
+    }
+
+    public static boolean releaseExternalCamera(String ownerId) {
+        if (ownerId == null || ownerId.isBlank()) {
+            return false;
+        }
+        synchronized (MOVE_LOCK) {
+            if (!externalCameraActive || !ownerId.equals(externalCameraOwner)) {
+                return false;
+            }
+        }
+        stopExternalCamera();
+        return true;
+    }
+
+    private static void stopExternalCamera() {
+        if (!externalCameraActive) {
+            return;
+        }
+
+        // External camera mode doesn't spawn an entity, so just clear state
+        synchronized (MOVE_LOCK) {
+            externalCameraActive = false;
+            externalCameraOwner = null;
+            externalCameraLastUpdateTick = -1;
+            externalCameraPos = Vec3.ZERO;
+            currentRoll = 0.0f;
+            currentFov = 1.0f;
+            currentYaw = 0.0f;
+            currentPitch = 0.0f;
+        }
+    }
+
     private static void applyRecordingMovementDamping() {
         if (MC.player == null || MC.screen != null || isActive()) return;
 
@@ -1509,9 +1612,32 @@ public class SimpleCameraManager {
     public static float getFov() { return currentFov; }
     public static SimpleCameraEntity getCamera() { return camera; }
 
+    public static double getExternalCameraPosX() {
+        return externalCameraPos.x;
+    }
+
+    public static double getExternalCameraPosY() {
+        return externalCameraPos.y;
+    }
+
+    public static double getExternalCameraPosZ() {
+        return externalCameraPos.z;
+    }
+
     /* ---------------- Queue / Movement ---------------- */
 
     public static void tick() {
+        if (externalCameraActive) {
+            if (MC.player == null || MC.level == null) {
+                stopExternalCamera();
+                return;
+            }
+            if (MC.gui != null && externalCameraLastUpdateTick >= 0 && (MC.gui.getGuiTicks() - externalCameraLastUpdateTick) > EXTERNAL_CAMERA_TIMEOUT_TICKS) {
+                stopExternalCamera();
+                return;
+            }
+        }
+
         // Apply instant movement damping at all times when enabled (not just during recording)
         if (instantMovementEnabled) {
             applyRecordingMovementDamping();
@@ -1855,8 +1981,13 @@ public class SimpleCameraManager {
             camera = null;
             active = false;
             previewPlaybackActive = false;
+            externalCameraActive = false;
+            externalCameraOwner = null;
+            externalCameraLastUpdateTick = -1;
             fadeStartTick = -1;
             ACTIVE_TEXTURES.clear();
+            TEXTURE_DIMENSIONS_CACHE.clear();
+            TEXTURE_RESOURCE_CACHE.clear();
             previewPlaybackStartTick = -1;
             previewPlaybackTotalMs = 0L;
 
@@ -1887,14 +2018,24 @@ public class SimpleCameraManager {
         switch (event.type.toLowerCase()) {
             case "texture":
                 if (data.has("path")) {
-                    ResourceLocation tex = ResourceLocation.parse(data.get("path").getAsString());
+                    ResourceLocation tex;
+                    try {
+                        tex = ResourceLocation.parse(data.get("path").getAsString());
+                    } catch (Exception e) {
+                        sendError("Invalid texture path in event: " + data.get("path").getAsString());
+                        break;
+                    }
+                    ResourceLocation resolvedTexture = resolveTextureResource(tex);
                     int tx = data.has("x") ? data.get("x").getAsInt() : 0;
                     int ty = data.has("y") ? data.get("y").getAsInt() : 0;
                     float ts = data.has("scale") ? data.get("scale").getAsFloat() : 1.0f;
-                    int td = data.has("duration") ? data.get("duration").getAsInt() / 50 : 100;
+                    int durationMs = data.has("duration") ? data.get("duration").getAsInt() : 1500;
+                    int td = Math.max(1, durationMs / 50);
                     String fade = data.has("fade") ? data.get("fade").getAsString().toLowerCase() : "none";
                     boolean centered = data.has("centered") && data.get("centered").getAsBoolean();
-                    ACTIVE_TEXTURES.add(new ActiveTexture(tex, tx, ty, ts, MC.gui.getGuiTicks(), td, fade, centered));
+                    TextureDimensions dims = resolveTextureDimensions(resolvedTexture);
+
+                    ACTIVE_TEXTURES.add(new ActiveTexture(resolvedTexture, tx, ty, ts, MC.gui.getGuiTicks(), td, fade, centered, dims.width(), dims.height()));
                 }
                 break;
             case "intro_fade":
@@ -1932,7 +2073,7 @@ public class SimpleCameraManager {
                             MC.level.setThunderLevel(1);
                         }
                     }
-        }
+                }
                 break;
             case "command":
                 if (data.has("cmd")) {
@@ -1978,6 +2119,76 @@ public class SimpleCameraManager {
         return rebuilt;
     }
 
+    private static TextureDimensions resolveTextureDimensions(ResourceLocation texture) {
+        TextureDimensions cached = TEXTURE_DIMENSIONS_CACHE.get(texture);
+        if (cached != null) {
+            return cached;
+        }
+
+        TextureDimensions resolved = new TextureDimensions(256, 256);
+        try {
+            Optional<Resource> resource = MC.getResourceManager().getResource(texture);
+            if (resource.isPresent()) {
+                try (var stream = resource.get().open(); NativeImage image = NativeImage.read(stream)) {
+                    resolved = new TextureDimensions(Math.max(1, image.getWidth()), Math.max(1, image.getHeight()));
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.debug("Could not read texture size for {}. Falling back to 256x256.", texture, e);
+        }
+
+        TEXTURE_DIMENSIONS_CACHE.put(texture, resolved);
+        return resolved;
+    }
+
+    private static ResourceLocation resolveTextureResource(ResourceLocation texture) {
+        ResourceLocation cached = TEXTURE_RESOURCE_CACHE.get(texture);
+        if (cached != null) {
+            return cached;
+        }
+
+        ResourceLocation resolved = findExistingTextureResource(texture).orElse(texture);
+        TEXTURE_RESOURCE_CACHE.put(texture, resolved);
+        return resolved;
+    }
+
+    private static Optional<ResourceLocation> findExistingTextureResource(ResourceLocation texture) {
+        List<ResourceLocation> candidates = new ArrayList<>();
+        addTextureCandidate(candidates, texture);
+
+        String path = texture.getPath();
+        String normalizedPath = path.startsWith("/") ? path.substring(1) : path;
+        if (!normalizedPath.equals(path)) {
+            addTextureCandidate(candidates, ResourceLocation.fromNamespaceAndPath(texture.getNamespace(), normalizedPath));
+        }
+
+        boolean hasPngExtension = normalizedPath.endsWith(".png");
+        if (!normalizedPath.startsWith("textures/")) {
+            String prefixedPath = "textures/" + normalizedPath;
+            addTextureCandidate(candidates, ResourceLocation.fromNamespaceAndPath(texture.getNamespace(), prefixedPath));
+            if (!hasPngExtension) {
+                addTextureCandidate(candidates, ResourceLocation.fromNamespaceAndPath(texture.getNamespace(), prefixedPath + ".png"));
+            }
+        }
+
+        if (!hasPngExtension) {
+            addTextureCandidate(candidates, ResourceLocation.fromNamespaceAndPath(texture.getNamespace(), normalizedPath + ".png"));
+        }
+
+        for (ResourceLocation candidate : candidates) {
+            if (MC.getResourceManager().getResource(candidate).isPresent()) {
+                return Optional.of(candidate);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static void addTextureCandidate(List<ResourceLocation> candidates, ResourceLocation candidate) {
+        if (!candidates.contains(candidate)) {
+            candidates.add(candidate);
+        }
+    }
+
     public static void renderFade(GuiGraphics graphics) {
         if (fadeStartTick == -1) return;
 
@@ -2010,10 +2221,10 @@ public class SimpleCameraManager {
             float drawY = t.y;
 
             if (t.centered) {
-                // Minecraft textures are typically 256x256 base size in blit
-                float size = 256 * t.scale;
-                drawX = (graphics.guiWidth() - size) / 2f;
-                drawY = (graphics.guiHeight() - size) / 2f;
+                float drawWidth = t.textureWidth * t.scale;
+                float drawHeight = t.textureHeight * t.scale;
+                drawX = (graphics.guiWidth() - drawWidth) / 2f;
+                drawY = (graphics.guiHeight() - drawHeight) / 2f;
             }
 
             graphics.pose().pushPose();
@@ -2024,7 +2235,7 @@ public class SimpleCameraManager {
             RenderSystem.defaultBlendFunc();
             RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, Mth.clamp(alpha, 0.0f, 1.0f));
 
-            graphics.blit(t.texture, 0, 0, 0, 0, 256, 256, 256, 256);
+            graphics.blit(t.texture, 0, 0, 0, 0, t.textureWidth, t.textureHeight, t.textureWidth, t.textureHeight);
 
             RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
             graphics.pose().popPose();
@@ -2197,12 +2408,13 @@ public class SimpleCameraManager {
     }
 
     private static float getAlpha(ActiveTexture t, int currentTick, float partial) {
-        float progress = ((currentTick + partial) - t.startTick) / (float) t.durationTicks;
+        int safeDurationTicks = Math.max(1, t.durationTicks);
+        float progress = ((currentTick + partial) - t.startTick) / (float) safeDurationTicks;
         float alpha = 1.0f;
 
         // Handle Fade Logic
-        int fadeTicks = Math.min(20, t.durationTicks / 4); // 1 second or 25% of duration
-        float fadeProgress = (float) fadeTicks / t.durationTicks;
+        int fadeTicks = Math.max(1, Math.min(20, safeDurationTicks / 4)); // 1 second or 25% of duration
+        float fadeProgress = (float) fadeTicks / safeDurationTicks;
 
         if (t.fadeMode.equals("in") || t.fadeMode.equals("both")) {
             if (progress < fadeProgress) alpha = progress / fadeProgress;

@@ -172,7 +172,7 @@
       "name": "overlay_logo",
       "type": "texture",
       "data": {
-        "path": "scm:textures/gui/balls_title.png",
+        "path": "scs:textures/gui/balls_title.png",
         "centered": true,
         "scale": 1.0,
         "duration": 1500,

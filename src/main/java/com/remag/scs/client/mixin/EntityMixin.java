@@ -11,7 +11,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class EntityMixin {
     @Inject(method = "push(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"), cancellable = true)
     private void onPushAwayFrom(Entity other, CallbackInfo ci) {
-        if (SimpleCameraManager.isActive() && (other.equals(SimpleCameraManager.getCamera()) || this.equals(SimpleCameraManager.getCamera()))) {
+        // Only prevent push if we're in a cutscene/preview with SimpleCameraEntity active
+        if ((SimpleCameraManager.isActive() || SimpleCameraManager.isPreviewPlaybackActive()) &&
+            (other.equals(SimpleCameraManager.getCamera()) || this.equals(SimpleCameraManager.getCamera()))) {
             ci.cancel();
         }
     }

@@ -5,6 +5,7 @@ import com.remag.scs.client.camera.SimpleCameraManager;
 import com.remag.scs.client.render.EventEditorScreen;
 import com.remag.scs.client.render.MultiNodeEditorScreen;
 import com.remag.scs.client.render.NodeEditorScreen;
+import com.remag.scs.client.OptionalMobTrackingBridge;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.commands.Commands;
@@ -179,11 +180,15 @@ public class SandboxCutscenesClient {
 
         // Logic (Queue processing) still happens at 20Hz
         SimpleCameraManager.tick();
+
+        // Demo: track mob with potato
+        OptionalMobTrackingBridge.tick();
     }
 
     @SubscribeEvent
     public static void onRenderFrame(RenderFrameEvent.Pre event) {
         SimpleCameraManager.recordFrame();
+        OptionalMobTrackingBridge.renderTick(Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false));
         if (SimpleCameraManager.isActive() || SimpleCameraManager.isPreviewPlaybackActive()) {
             SimpleCameraManager.renderTick(Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false));
         }
@@ -289,6 +294,19 @@ public class SandboxCutscenesClient {
     @SubscribeEvent
     public static void onInput(InputEvent.MouseButton.Pre event) {
         Minecraft mc = Minecraft.getInstance();
+
+        // Demo: potato right-click to toggle mob tracking
+        if (event.getButton() == GLFW.GLFW_MOUSE_BUTTON_RIGHT && event.getAction() == GLFW.GLFW_PRESS) {
+            if (mc.player != null) {
+                ItemStack held = mc.player.getMainHandItem();
+                if (held.getItem() == net.minecraft.world.item.Items.POTATO) {
+                    OptionalMobTrackingBridge.toggleTracking();
+                    event.setCanceled(true);
+                    return;
+                }
+            }
+        }
+
         if (!Config.DEVELOPER_MODE.get() || !CameraPathRenderer.isVisible() || SimpleCameraManager.isActive() || mc.screen != null) return;
 
         boolean holdingTool = false;

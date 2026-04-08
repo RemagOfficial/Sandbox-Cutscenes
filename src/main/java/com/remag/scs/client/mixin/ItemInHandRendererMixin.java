@@ -31,7 +31,7 @@ public abstract class ItemInHandRendererMixin {
                               int seed,
                               CallbackInfo ci) {
 
-        // Cancel the item rendering if the camera manager is active
+        // Cancel the item rendering only during actual cutscenes with SimpleCameraEntity
         if (SimpleCameraManager.isActive() &&
                 Minecraft.getInstance().getCameraEntity() instanceof SimpleCameraEntity) {
             ci.cancel();

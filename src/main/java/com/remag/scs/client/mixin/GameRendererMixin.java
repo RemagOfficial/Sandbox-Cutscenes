@@ -14,7 +14,7 @@ public class GameRendererMixin {
 
     @Inject(method = "getFov", at = @At("RETURN"), cancellable = true)
     private void adjustFovForCutscene(net.minecraft.client.Camera camera, float partialTick, boolean useFOVSetting, CallbackInfoReturnable<Double> cir) {
-        if (SimpleCameraManager.isActive()) {
+        if (SimpleCameraManager.isActive() || SimpleCameraManager.isExternalCameraActive()) {
             double baseFov = cir.getReturnValue();
             float zoomScale = SimpleCameraManager.getFov(); // 0.0 to 1.0
             
@@ -28,7 +28,7 @@ public class GameRendererMixin {
     @Inject(method = "shouldRenderBlockOutline", at = @At("HEAD"), cancellable = true)
     private void disableBlockOutlineWhileCameraActive(CallbackInfoReturnable<Boolean> cir) {
         // If your camera system has a static "isActive()" or similar flag
-        if (SimpleCameraManager.isActive() &&
+        if (SimpleCameraManager.isCameraEntityActive() &&
                 Minecraft.getInstance().getCameraEntity() instanceof SimpleCameraEntity) {
             cir.setReturnValue(false);
             cir.cancel();
