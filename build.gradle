@@ -116,9 +116,8 @@ neoForge {
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 tasks.named('processResources', ProcessResources).configure {
-    filesMatching('scs.mixins.json') {
+    inputs.property('includeMobTracking', includeMobTracking)
         filter(ReplaceTokens, tokens: [mobtrackingMixinEntry: includeMobTracking ? '"mobtracking.LivingEntityRendererMixin",' : ''])
-    }
 }
 
 tasks.withType(Jar).configureEach {

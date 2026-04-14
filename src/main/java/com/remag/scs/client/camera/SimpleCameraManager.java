@@ -158,7 +158,7 @@ public class SimpleCameraManager {
             LOGGER.error("[Sandbox Cutscenes] {}", message);
         }
     }
-    private record ActiveTexture(ResourceLocation texture, int x, int y, float scale, int startTick, int durationTicks, String fadeMode, boolean centered, int textureWidth, int textureHeight) {}
+    private record ActiveTexture(ResourceLocation texture, int x, int y, float scale, int startTick, int durationTicks, String fadeMode, boolean centered, int textureWidth, int textureHeight, boolean upscale, int referenceWidth, int referenceHeight) {}
     private record TextureDimensions(int width, int height) {}
     private record OverlayEntry(Component text, int color) {}
     private record DurationMarker(long timeMs, int order, int color, int count) {}
@@ -2033,9 +2033,20 @@ public class SimpleCameraManager {
                     int td = Math.max(1, durationMs / 50);
                     String fade = data.has("fade") ? data.get("fade").getAsString().toLowerCase() : "none";
                     boolean centered = data.has("centered") && data.get("centered").getAsBoolean();
+                    boolean upscale = data.has("upscale") && data.get("upscale").getAsBoolean();
+                    int referenceWidth = data.has("reference_width") ? data.get("reference_width").getAsInt() : -1;
+                    int referenceHeight = data.has("reference_height") ? data.get("reference_height").getAsInt() : -1;
+                    if (referenceWidth == 0 || referenceHeight == 0) {
+                        sendError("Texture event reference_width/reference_height must be greater than 0.");
+                        break;
+                    }
+                    if (Math.abs(ts - 1.0f) > 0.0001f && (referenceWidth < 1 || referenceHeight < 1)) {
+                        sendError("Texture event scale values other than 1.0 require reference_width and reference_height.");
+                        break;
+                    }
                     TextureDimensions dims = resolveTextureDimensions(resolvedTexture);
 
-                    ACTIVE_TEXTURES.add(new ActiveTexture(resolvedTexture, tx, ty, ts, MC.gui.getGuiTicks(), td, fade, centered, dims.width(), dims.height()));
+                    ACTIVE_TEXTURES.add(new ActiveTexture(resolvedTexture, tx, ty, ts, MC.gui.getGuiTicks(), td, fade, centered, dims.width(), dims.height(), upscale, referenceWidth, referenceHeight));
                 }
                 break;
             case "intro_fade":
@@ -2217,19 +2228,33 @@ public class SimpleCameraManager {
         for (ActiveTexture t : ACTIVE_TEXTURES) {
             float alpha = getAlpha(t, currentTick, partial);
 
+            float drawScale = t.scale;
             float drawX = t.x;
             float drawY = t.y;
 
+            if (t.referenceWidth() > 0 && t.referenceHeight() > 0) {
+                float scaleX = graphics.guiWidth() / (float) t.referenceWidth();
+                float scaleY = graphics.guiHeight() / (float) t.referenceHeight();
+                float screenScale = Math.min(scaleX, scaleY);
+                if (!t.upscale() && screenScale > 1.0f) {
+                    screenScale = 1.0f;
+                }
+
+                drawScale *= screenScale;
+                drawX *= scaleX;
+                drawY *= scaleY;
+            }
+
             if (t.centered) {
-                float drawWidth = t.textureWidth * t.scale;
-                float drawHeight = t.textureHeight * t.scale;
+                float drawWidth = t.textureWidth * drawScale;
+                float drawHeight = t.textureHeight * drawScale;
                 drawX = (graphics.guiWidth() - drawWidth) / 2f;
                 drawY = (graphics.guiHeight() - drawHeight) / 2f;
             }
 
             graphics.pose().pushPose();
             graphics.pose().translate(drawX, drawY, 500);
-            graphics.pose().scale(t.scale, t.scale, 1.0f);
+            graphics.pose().scale(drawScale, drawScale, 1.0f);
 
             RenderSystem.enableBlend();
             RenderSystem.defaultBlendFunc();
